@@ -13,6 +13,13 @@
 --   [HOLD] 1 OrderItem = 1 HoldRelease = 1 FeeLedger
 --   [SHOP] 1 User = 1 Shop; level giới hạn số sản phẩm (allowed_product_count)
 --   [IDEM] UNIQUE (user_id, idempotency_key) trên orders — chặn double-submit ngay tại DB
+--   [DLV] Nội dung giao khách thống nhất tên delivery_content:
+--         INSTANT   : import TXT, 1 dòng = 1 asset → digital_assets.delivery_content;
+--                     khi giao SNAPSHOT nguyên văn vào asset_delivery_logs.delivery_content_snapshot
+--                     → buyer xem lại TỪ SNAPSHOT, không đọc lại kho
+--         PRE_ORDER : shop nhập account/key/tin nhắn → pre_order_items.delivery_content
+--                     (+ delivery_content_type ACCOUNT|KEY|MESSAGE|OTHER)
+--         seller_notes = ghi chú NỘI BỘ của shop, KHÔNG dùng để giao hàng
 --
 -- Cách dùng:
 --   psql -h localhost -p 5678 -U postgres -d commercehub_db -f schema-v8.sql
@@ -382,7 +389,10 @@ CREATE TABLE IF NOT EXISTS digital_assets (
     product_variant_id  BIGINT       NOT NULL REFERENCES product_variants(id),
     asset_type          VARCHAR(50)  NOT NULL
                             CHECK (asset_type IN ('ACCOUNT','LICENSE','GIFTCARD','COOKIE','OTHER')),
-    asset_data          JSONB        NOT NULL,
+    -- v8-DLV: NGUYÊN VĂN 1 dòng TXT giao cho khách (1 dòng TXT = 1 asset khi import).
+    delivery_content    TEXT,
+    -- asset_data: dữ liệu cũ/metadata — TEXT khớp entity DigitalAsset (Hibernate validate)
+    asset_data          TEXT         NOT NULL,
     asset_identifier    VARCHAR(500),
     status              VARCHAR(30)  NOT NULL DEFAULT 'AVAILABLE'
                             CHECK (status IN ('AVAILABLE','RESERVED','SOLD','DISPUTED','REVOKED')),
@@ -408,18 +418,23 @@ CREATE TABLE IF NOT EXISTS product_images (
 );
 
 CREATE TABLE IF NOT EXISTS asset_delivery_logs (
-    id                  BIGSERIAL   PRIMARY KEY,
-    asset_id            BIGINT      NOT NULL REFERENCES digital_assets(id),
-    order_item_id       BIGINT      NOT NULL,
-    buyer_id            BIGINT      NOT NULL REFERENCES users(id),
-    asset_data_snapshot JSONB       NOT NULL,
-    delivery_method     VARCHAR(30) NOT NULL DEFAULT 'AUTO'
-                            CHECK (delivery_method IN ('AUTO','MANUAL','RESEND')),
-    status              VARCHAR(30) NOT NULL DEFAULT 'SUCCESS'
-                            CHECK (status IN ('SUCCESS','FAILED','RESENT')),
-    error_message       TEXT,
-    delivered_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id                        BIGSERIAL   PRIMARY KEY,
+    asset_id                  BIGINT      NOT NULL REFERENCES digital_assets(id),
+    order_item_id             BIGINT      NOT NULL,
+    buyer_id                  BIGINT      NOT NULL REFERENCES users(id),
+    -- v8-DLV: bản chụp CỐ ĐỊNH nội dung đã giao — buyer mở lại đơn đọc từ đây,
+    -- KHÔNG đọc lại digital_assets (kho có thể bị sửa/thu hồi sau khi bán)
+    delivery_content_snapshot TEXT,
+    asset_data_snapshot       JSONB       NOT NULL,
+    delivery_method           VARCHAR(30) NOT NULL DEFAULT 'AUTO'
+                                  CHECK (delivery_method IN ('AUTO','MANUAL','RESEND')),
+    status                    VARCHAR(30) NOT NULL DEFAULT 'SUCCESS'
+                                  CHECK (status IN ('SUCCESS','FAILED','RESENT')),
+    error_message             TEXT,
+    delivered_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE INDEX IF NOT EXISTS idx_adl_order_item ON asset_delivery_logs(order_item_id);
+CREATE INDEX IF NOT EXISTS idx_adl_buyer ON asset_delivery_logs(buyer_id, delivered_at DESC);
 
 CREATE TABLE IF NOT EXISTS asset_access_logs (
     id          BIGSERIAL   PRIMARY KEY,
@@ -554,18 +569,24 @@ CREATE TABLE IF NOT EXISTS order_items (
 );
 CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
 
+-- v8-DLV: delivery_content = nội dung shop giao khách (account/key/tin nhắn), buyer xem lại
+-- vĩnh viễn từ cột này. seller_notes = ghi chú NỘI BỘ, không bao giờ trả cho buyer.
+-- Đã bỏ delivered_asset_data + shop_note (thay bằng delivery_content + seller_notes).
 CREATE TABLE IF NOT EXISTS pre_order_items (
-    id                   BIGSERIAL    PRIMARY KEY,
-    order_item_id        BIGINT       NOT NULL UNIQUE REFERENCES order_items(id) ON DELETE CASCADE,
-    buyer_inputs         JSONB,
-    buyer_note           TEXT,
-    status               VARCHAR(30)  NOT NULL DEFAULT 'PENDING',
-    delivered_asset_data JSONB,
-    shop_note            TEXT,
-    seller_notes         TEXT,
-    completed_at         TIMESTAMPTZ,
-    created_at           TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at           TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    id                    BIGSERIAL    PRIMARY KEY,
+    order_item_id         BIGINT       NOT NULL UNIQUE REFERENCES order_items(id) ON DELETE CASCADE,
+    buyer_inputs          TEXT,        -- JSON string — TEXT khớp entity PreOrderItem (Hibernate validate)
+    buyer_note            TEXT,
+    status                VARCHAR(30)  NOT NULL DEFAULT 'PENDING'
+                              CHECK (status IN ('PENDING','ACCEPTED','PROCESSING','DELIVERED','REJECTED','CANCELLED')),
+    delivery_content      TEXT,
+    delivery_content_type VARCHAR(20),
+    seller_notes          TEXT,
+    accepted_at           TIMESTAMPTZ,
+    delivered_at          TIMESTAMPTZ,
+    completed_at          TIMESTAMPTZ,
+    created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS order_status_logs (
@@ -883,8 +904,27 @@ CREATE TABLE IF NOT EXISTS shedlock (
 );
 
 -- ============================================================
--- CLEANUP LEGACY
+-- UPGRADE (DB đã tạo bằng bản cũ của file này) + CLEANUP LEGACY
 -- ============================================================
+-- Idempotent: DB mới thì các cột đã có sẵn trong CREATE TABLE, ALTER bên dưới bị bỏ qua.
+ALTER TABLE digital_assets      ADD COLUMN IF NOT EXISTS delivery_content TEXT;
+-- DB cũ tạo cột dạng JSONB → đổi sang TEXT khớp entity (Hibernate validate)
+ALTER TABLE digital_assets      ALTER COLUMN asset_data   TYPE TEXT USING asset_data::text;
+ALTER TABLE pre_order_items     ALTER COLUMN buyer_inputs TYPE TEXT USING buyer_inputs::text;
+ALTER TABLE asset_delivery_logs ADD COLUMN IF NOT EXISTS delivery_content_snapshot TEXT;
+ALTER TABLE pre_order_items     ADD COLUMN IF NOT EXISTS delivery_content TEXT;
+ALTER TABLE pre_order_items     ADD COLUMN IF NOT EXISTS delivery_content_type VARCHAR(20);
+ALTER TABLE pre_order_items     ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
+ALTER TABLE pre_order_items     ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
+
+ALTER TABLE pre_order_items DROP CONSTRAINT IF EXISTS chk_pre_order_delivery_content_type;
+ALTER TABLE pre_order_items ADD CONSTRAINT chk_pre_order_delivery_content_type
+    CHECK (delivery_content_type IS NULL
+           OR delivery_content_type IN ('ACCOUNT','KEY','MESSAGE','OTHER'));
+
+-- DB cũ có thể còn cột delivered_asset_data / shop_note trên pre_order_items:
+-- giữ nguyên để đối soát, chuyển dữ liệu sang delivery_content xong thì DROP thủ công.
+
 DROP TABLE IF EXISTS favorite_shops CASCADE;
 
 -- ============================================================
@@ -960,4 +1000,14 @@ COMMIT;
 --      sale 100   → fee 4,   net 96      (4 + 96 = 100)
 --      subtotal 20000, voucher 400 → sale 19600 → fee 784, net 18816
 --      (voucher 400 + net 18816 + fee 784 = 20000)
+-- G. GIAO HÀNG (delivery_content):
+--      INSTANT   : import TXT (1 dòng = 1 asset AVAILABLE) → mua: lock + RESERVED
+--                  → thanh toán OK: snapshot nguyên văn vào asset_delivery_logs
+--                  → asset SOLD; buyer xem lại TỪ delivery_content_snapshot (không đọc kho)
+--      PRE_ORDER : PENDING → ACCEPTED (accepted_at) → PROCESSING
+--                  → shop nhập delivery_content (+type) → DELIVERED (delivered_at)
+--                  hoặc PENDING → REJECTED / CANCELLED (hoàn tiền)
+--      BẢO MẬT   : không log nội dung; chỉ trả trong API chi tiết đơn (buyer sở hữu,
+--                  shop bán — phục vụ bảo hành, admin); Cache-Control: no-store;
+--                  không đưa nội dung vào URL; cân nhắc mã hóa at-rest (AES-GCM/pgcrypto)
 -- ============================================================

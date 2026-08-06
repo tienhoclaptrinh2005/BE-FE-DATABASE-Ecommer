@@ -15,6 +15,10 @@
 > - PRE_ORDER trừ ví **ngay lúc checkout**
 > - Mua hàng luôn **WALLET** (nạp trước — mua sau)
 > - Fee nằm ở package `fee/` (không nhét entity fee vào `wallet/`)
+> - **[DLV]** Nội dung giao khách thống nhất `delivery_content`:
+>   INSTANT = `digital_assets.delivery_content` → snapshot `asset_delivery_logs.delivery_content_snapshot`;
+>   PRE_ORDER = shop nhập `pre_order_items.delivery_content` (+ `delivery_content_type`).
+>   `seller_notes` chỉ là ghi chú nội bộ, không dùng để giao hàng.
 
 ```
 commercehub-backend/
@@ -148,8 +152,12 @@ commercehub-backend/
     │   │   │   │   ├── ProductReview.java
     │   │   │   │   └── ProductVariant.java
     │   │   │   ├── mapper/ProductMapper.java
-    │   │   │   ├── repository/ …                     -- + ProductSpecification
-    │   │   │   └── service/ …
+    │   │   │   ├── repository/ …                     -- + ProductSpecification; AssetDeliveryLogRepository.findByOrderId
+    │   │   │   └── service/ …                        -- [DONE] DigitalAsset/AssetDelivery/Review/Variant/Search/PreOrderConfig
+    │   │   │   # [DONE-DLV] DigitalAsset entity: + deliveryContent (nguyên văn 1 dòng giao khách)
+    │   │   │   # [DONE-DLV] uploadAssets: 1 dòng TXT = 1 asset, ghi deliveryContent (không cần AssetImportService riêng)
+    │   │   │   # [DONE-DLV] AssetDeliveryLog entity: + deliveryContentSnapshot — chụp nguyên văn lúc giao
+    │   │   │   # [DONE-DLV] AssetDeliveryService.logDelivery: snapshot delivery_content (jsonb-safe)
     │   │   │
     │   │   ├── cart/                                 -- [DONE] [ADD v8]
     │   │   │   ├── controller/CartController.java    -- /api/v1/cart
@@ -181,17 +189,25 @@ commercehub-backend/
     │   │   ├── order/                                -- [DONE]
     │   │   │   ├── controller/
     │   │   │   │   ├── CheckoutController.java
-    │   │   │   │   ├── OrderController.java
-    │   │   │   │   └── SellerOrderController.java
+    │   │   │   │   ├── OrderController.java           -- [DONE-DLV] GET /{id}/assets đọc SNAPSHOT asset_delivery_logs
+    │   │   │   │   │                                  --   (fallback kho cho đơn cũ chưa có log)
+    │   │   │   │   └── SellerOrderController.java     -- [DONE] POST /{id}/accept, /{id}/complete
+    │   │   │   │                                      -- [DONE-DLV] /complete nhận body DeliverPreOrderRequest
     │   │   │   ├── dto/request/
     │   │   │   │   ├── CheckoutItemRequest.java
-    │   │   │   │   └── CheckoutRequest.java           -- + idempotencyKey; force WALLET
+    │   │   │   │   ├── CheckoutRequest.java           -- + idempotencyKey; force WALLET
+    │   │   │   │   └── DeliverPreOrderRequest.java    -- [DONE-DLV] deliveryContentType + deliveryContent (@NotBlank, max 10000) + sellerNotes
     │   │   │   ├── dto/response/ …
+    │   │   │   │   ├── DeliveredAssetResponse.java    -- [DONE-DLV] content từ snapshot (INSTANT)
+    │   │   │   │   └── PreOrderItemResponse.java      -- [DONE-DLV] status + deliveryContent trong chi tiết đơn (PRE_ORDER)
     │   │   │   ├── entity/
     │   │   │   │   ├── Order.java
     │   │   │   │   ├── OrderItem.java                 -- fee snapshot fields
     │   │   │   │   ├── OrderStatusLog.java
-    │   │   │   │   └── PreOrderItem.java
+    │   │   │   │   ├── PreOrderItem.java              -- [DONE-DLV] + status, deliveryContent, deliveryContentType,
+    │   │   │   │   │                                  --   acceptedAt, deliveredAt, completedAt
+    │   │   │   │   └── DeliveryContentType.java       -- [DONE-DLV] enum ACCOUNT | KEY | MESSAGE | OTHER
+    │   │   │   │   # status PreOrderItem dùng String (khớp style codebase): PENDING|ACCEPTED|PROCESSING|DELIVERED|REJECTED|CANCELLED
     │   │   │   ├── mapper/OrderMapper.java
     │   │   │   ├── repository/
     │   │   │   │   ├── OrderRepository.java           -- pessimistic lock, idempotency
@@ -204,9 +220,12 @@ commercehub-backend/
     │   │   │   └── service/
     │   │   │       ├── CheckoutService.java
     │   │   │       ├── InstantOrderService.java      -- 1 item = 1 HoldRelease + 1 FeeLedger
+    │   │   │       │                                  -- [DONE-DLV] khi bán: snapshot nguyên văn vào asset_delivery_logs
     │   │   │       ├── PreOrderService.java          -- trừ ví ngay + snapshot phí
-    │   │   │       ├── PreOrderApprovalService.java
-    │   │   │       ├── OrderService.java
+    │   │   │       ├── PreOrderApprovalService.java  -- [DONE] accept/reject/complete + lock
+    │   │   │       │                                  -- [DONE-DLV] accept→ACCEPTED+acceptedAt; complete→deliveryContent+type,
+    │   │   │       │                                  --   DELIVERED+deliveredAt; reject/cancel→REJECTED/CANCELLED
+    │   │   │       ├── OrderService.java             -- [DONE-DLV] chi tiết đơn gắn PreOrderItemResponse cho item PRE_ORDER
     │   │   │       └── OrderStatusService.java
     │   │   │
     │   │   ├── fee/                                  -- [DONE] (KHÔNG waive)
@@ -489,3 +508,27 @@ Nạp ví (VNPay IPN, đối chiếu amount)
   → T+7 HoldReleaseScheduler: seller net + platform fee (COLLECTED)
   → dispute buyer win: cancel hold + refund buyer + ledger CANCELLED
 ```
+
+## Luồng giao hàng (delivery_content)
+
+```
+INSTANT:
+  seller import TXT (1 dòng = 1 asset, delivery_content) → AVAILABLE
+  → khách mua: lock N dòng AVAILABLE → RESERVED → thanh toán OK
+  → snapshot nguyên văn vào asset_delivery_logs.delivery_content_snapshot → asset SOLD
+  → buyer xem lại đơn: đọc TỪ SNAPSHOT (không đọc lại kho)
+
+PRE_ORDER:
+  khách đặt (trừ ví ngay) → shop accept (acceptedAt, PENDING→ACCEPTED→PROCESSING)
+  → shop nhập delivery_content (+ deliveryContentType) → DELIVERED (deliveredAt)
+  → buyer xem lại từ pre_order_items.delivery_content
+  hoặc PENDING → REJECTED / quá hạn → CANCELLED (hoàn tiền)
+```
+
+## Bảo mật delivery content (bắt buộc khi implement)
+
+- **Không ghi** `delivery_content` / snapshot vào log ứng dụng.
+- Chỉ trả nội dung trong **API chi tiết đơn** — không bao giờ trong API danh sách.
+- Quyền xem: **buyer sở hữu đơn**, **shop bán** (để đối chiếu bảo hành khi khách báo lỗi tài khoản/key), **admin** xử lý dispute.
+- Response chi tiết đơn: `Cache-Control: no-store`; không đưa nội dung vào URL/query.
+- Roadmap: mã hóa at-rest (AES-GCM ở app layer hoặc pgcrypto) trước khi lưu DB.

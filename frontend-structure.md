@@ -273,12 +273,14 @@ commercehub-frontend/                                 -- [TODO] scaffold
     │   │   └── CheckoutResultCard.tsx
     │   │
     │   ├── order/
-    │   │   ├── OrderCard.tsx
+    │   │   ├── OrderCard.tsx                          -- danh sách: KHÔNG hiển thị delivery_content
     │   │   ├── OrderStatusStepper.tsx
     │   │   ├── OrderStatusBadge.tsx
     │   │   ├── OrderItemDetail.tsx
-    │   │   ├── DeliveredAssetBox.tsx
-    │   │   ├── PreOrderItemDetail.tsx
+    │   │   ├── DeliveryContentBox.tsx                 -- deliveries[] THỐNG NHẤT INSTANT + PRE_ORDER:
+    │   │   │                                          --   click-reveal + nút copy (không đưa nội dung vào URL)
+    │   │   ├── DeliveryContentTypeBadge.tsx           -- ACCOUNT | KEY | MESSAGE | OTHER
+    │   │   ├── PreOrderItemDetail.tsx                 -- buyerInputs, acceptedAt, deadline; DELIVERED → DeliveryContentBox
     │   │   ├── OrderStatusLog.tsx
     │   │   ├── PreOrderApprovalTimer.tsx
     │   │   └── ReviewOrderButton.tsx
@@ -331,15 +333,17 @@ commercehub-frontend/                                 -- [TODO] scaffold
     │   │   │   ├── ProductForm.tsx
     │   │   │   ├── VariantForm.tsx
     │   │   │   ├── VariantList.tsx
-    │   │   │   ├── AssetUploadForm.tsx
+    │   │   │   ├── AssetUploadForm.tsx                -- import TXT: 1 dòng = 1 asset (delivery_content), preview trước khi lưu
     │   │   │   ├── AssetTable.tsx
     │   │   │   └── PreOrderConfigForm.tsx
     │   │   ├── order/
     │   │   │   ├── SellerOrderTable.tsx
     │   │   │   ├── PreOrderTable.tsx
-    │   │   │   ├── ApprovePreOrderDialog.tsx
+    │   │   │   ├── ApprovePreOrderDialog.tsx          -- accept + ghi chú nội bộ (sellerNotes)
     │   │   │   ├── RejectPreOrderDialog.tsx
-    │   │   │   └── CompletePreOrderForm.tsx
+    │   │   │   ├── DeliverPreOrderForm.tsx            -- Ô "Nội dung giao cho người mua" (textarea)
+    │   │   │   │                                      --   + select loại ACCOUNT/KEY/MESSAGE/OTHER → POST /complete
+    │   │   │   └── DeliveredContentReview.tsx         -- shop xem lại nội dung đã giao (đối chiếu bảo hành)
     │   │   ├── dispute/
     │   │   │   ├── DisputeResponseForm.tsx
     │   │   │   └── DisputeEvidenceList.tsx
@@ -456,8 +460,9 @@ commercehub-frontend/                                 -- [TODO] scaffold
     │   ├── asset.types.ts
     │   ├── voucher.types.ts
     │   ├── cart.types.ts                             -- [ADD]
-    │   ├── order.types.ts
-    │   ├── preorder.types.ts
+    │   ├── order.types.ts                            -- + DeliveryContent { contentType, content, deliveredAt }
+    │   ├── preorder.types.ts                         -- PreOrderStatus: PENDING|ACCEPTED|PROCESSING|DELIVERED|REJECTED|CANCELLED
+    │   │                                             -- DeliveryContentType: ACCOUNT|KEY|MESSAGE|OTHER
     │   ├── dispute.types.ts
     │   ├── wallet.types.ts
     │   ├── fee.types.ts                              -- FeeLedgerStatus không có WAIVED
@@ -498,6 +503,26 @@ commercehub-frontend/                                 -- [TODO] scaffold
 | `removeItem` | `DELETE /api/v1/cart/items/{id}` |
 | `clear` | `DELETE /api/v1/cart` |
 | `checkout` | `POST /api/v1/cart/checkout` |
+
+## Hiển thị nội dung giao hàng (deliveries[] thống nhất)
+
+Trang chi tiết đơn dùng **một** cấu trúc cho cả 2 loại — chỉ khác phần trạng thái trước khi giao:
+
+```json
+{
+  "orderItemId": 501,
+  "quantity": 2,
+  "deliveries": [
+    { "contentType": "ACCOUNT", "content": "acc01@gmail.com|pass01|Hạn 30 ngày", "deliveredAt": "..." },
+    { "contentType": "ACCOUNT", "content": "acc02@gmail.com|pass02|Hạn 60 ngày", "deliveredAt": "..." }
+  ]
+}
+```
+
+- INSTANT: backend đọc từ `asset_delivery_logs.delivery_content_snapshot`
+- PRE_ORDER: backend đọc từ `pre_order_items.delivery_content`
+- Quy tắc UI: chỉ hiện ở **trang chi tiết** (danh sách đơn không có nội dung); click-reveal
+  mới hiện; copy bằng clipboard API — **không** đưa nội dung vào URL; không cache trang này.
 
 ## Thứ tự scaffold gợi ý
 

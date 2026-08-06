@@ -12,6 +12,7 @@ Thư mục này chứa **1 file database**, **cấu trúc backend (DONE + TODO)*
 | Fee rate mặc định | **4%** (`0.0400`), làm tròn **CEILING** |
 | PRE_ORDER tiền | Trừ ví **ngay lúc checkout** |
 | Thanh toán mua hàng | Luôn **WALLET** (nạp trước — mua sau) |
+| Nội dung giao khách | Thống nhất **`delivery_content`** — INSTANT: 1 dòng TXT = 1 asset, giao thì **snapshot** vào `asset_delivery_logs`; PRE_ORDER: shop nhập account/key/tin nhắn vào `pre_order_items` (+ loại ACCOUNT/KEY/MESSAGE/OTHER). Buyer xem lại vĩnh viễn từ snapshot/cột đơn, **không đọc lại kho** |
 
 ## Cấu trúc thư mục
 
@@ -53,6 +54,7 @@ java -cp "%USERPROFILE%\.m2\repository\org\postgresql\postgresql\42.7.10\postgre
 - `DROP favorite_shops` (cleanup legacy)
 - Seed: roles, level_configs, categories, ví platform
 - Seed fee 4% **chỉ khi đã có ít nhất 1 user** (FK `created_by`)
+- Cột giao hàng v8: `digital_assets.delivery_content`, `asset_delivery_logs.delivery_content_snapshot`, `pre_order_items.delivery_content` + `delivery_content_type` + `accepted_at`/`delivered_at` (kèm khối ALTER idempotent cho DB tạo bằng bản cũ)
 - Ràng buộc bổ sung: UNIQUE `(user_id, idempotency_key)` cho `orders`; UNIQUE chat room (kể cả khi `shop_id` NULL); `orders.payment_method` chỉ cho phép `WALLET`
 
 ### Kiểm tra nhanh
