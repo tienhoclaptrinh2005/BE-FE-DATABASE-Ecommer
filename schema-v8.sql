@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS users (
     email              VARCHAR(255)  NOT NULL UNIQUE,
     phone              VARCHAR(20)   UNIQUE,
     username           VARCHAR(100)  UNIQUE,
+    username_changed_at TIMESTAMPTZ,
     password_hash      VARCHAR(255)  NOT NULL,
     full_name          VARCHAR(255)  NOT NULL,
     avatar_url         VARCHAR(500),
