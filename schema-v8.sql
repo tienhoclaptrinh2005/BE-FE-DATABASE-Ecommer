@@ -331,12 +331,48 @@ CREATE INDEX IF NOT EXISTS idx_shop_reports_shop_status ON shop_reports(shop_id,
 
 CREATE TABLE IF NOT EXISTS categories (
     id         BIGSERIAL    PRIMARY KEY,
+    parent_id  BIGINT,
     name       VARCHAR(255) NOT NULL,
     slug       VARCHAR(255) NOT NULL UNIQUE,
     icon_url   VARCHAR(500),
     is_active  BOOLEAN      NOT NULL DEFAULT TRUE,
-    sort_order INT          NOT NULL DEFAULT 0
+    sort_order INT          NOT NULL DEFAULT 0,
+    CONSTRAINT fk_categories_parent
+        FOREIGN KEY (parent_id) REFERENCES categories(id) ON DELETE RESTRICT,
+    CONSTRAINT chk_categories_parent_not_self
+        CHECK (parent_id IS NULL OR parent_id <> id)
 );
+
+-- Migration an toàn khi chạy file này trên database đã có bảng categories.
+ALTER TABLE categories ADD COLUMN IF NOT EXISTS parent_id BIGINT;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'fk_categories_parent'
+          AND conrelid = 'categories'::regclass
+    ) THEN
+        ALTER TABLE categories
+            ADD CONSTRAINT fk_categories_parent
+            FOREIGN KEY (parent_id) REFERENCES categories(id) ON DELETE RESTRICT;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'chk_categories_parent_not_self'
+          AND conrelid = 'categories'::regclass
+    ) THEN
+        ALTER TABLE categories
+            ADD CONSTRAINT chk_categories_parent_not_self
+            CHECK (parent_id IS NULL OR parent_id <> id);
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_categories_parent_active_sort
+    ON categories(parent_id, is_active, sort_order);
 
 CREATE TABLE IF NOT EXISTS products (
     id                   BIGSERIAL     PRIMARY KEY,
@@ -950,18 +986,60 @@ ON CONFLICT (level) DO UPDATE SET
     min_spent = EXCLUDED.min_spent,
     description = EXCLUDED.description;
 
+-- Danh mục cấp 1: chỉ dùng để gom nhóm và lọc toàn bộ danh mục con.
+INSERT INTO categories (name, slug, sort_order, is_active, parent_id) VALUES
+    ('Giải trí',          'giai-tri',        1,  true, NULL),
+    ('AI & Công việc',    'ai-cong-viec',    2,  true, NULL),
+    ('Trò chơi',          'tro-choi',        3,  true, NULL),
+    ('Khác & tổng hợp',   'khac-tong-hop',   99, true, NULL)
+ON CONFLICT (slug) DO UPDATE SET
+    name = EXCLUDED.name,
+    sort_order = EXCLUDED.sort_order;
+
+-- Danh mục cấp 2: sản phẩm bắt buộc gắn trực tiếp vào một danh mục cấp này.
+-- Giữ nguyên các slug cũ để không làm mất liên kết của sản phẩm hiện có.
 INSERT INTO categories (name, slug, sort_order, is_active) VALUES
     ('Netflix',         'netflix',          1,  true),
     ('Spotify',         'spotify',          2,  true),
     ('YouTube Premium', 'youtube-premium',  3,  true),
-    ('ChatGPT Plus',    'chatgpt-plus',     4,  true),
-    ('Steam',           'steam',            5,  true),
-    ('Canva Pro',       'canva-pro',        6,  true),
-    ('Adobe Creative',  'adobe-creative',   7,  true),
-    ('Microsoft 365',   'microsoft-365',    8,  true),
-    ('Game Account',    'game-account',     9,  true),
-    ('Khác',            'other',            99, true)
-ON CONFLICT (slug) DO NOTHING;
+    ('ChatGPT Plus',    'chatgpt-plus',     1,  true),
+    ('Canva Pro',       'canva-pro',        2,  true),
+    ('Adobe Creative',  'adobe-creative',   3,  true),
+    ('Microsoft 365',   'microsoft-365',    4,  true),
+    ('Steam',           'steam',            1,  true),
+    ('Game Account',    'game-account',     2,  true),
+    ('Khác',            'other',            1,  true)
+ON CONFLICT (slug) DO UPDATE SET
+    name = EXCLUDED.name,
+    sort_order = EXCLUDED.sort_order;
+
+UPDATE categories AS child
+SET parent_id = parent.id
+FROM categories AS parent
+WHERE parent.slug = 'giai-tri'
+  AND child.slug IN ('netflix', 'spotify', 'youtube-premium')
+  AND child.parent_id IS DISTINCT FROM parent.id;
+
+UPDATE categories AS child
+SET parent_id = parent.id
+FROM categories AS parent
+WHERE parent.slug = 'ai-cong-viec'
+  AND child.slug IN ('chatgpt-plus', 'canva-pro', 'adobe-creative', 'microsoft-365')
+  AND child.parent_id IS DISTINCT FROM parent.id;
+
+UPDATE categories AS child
+SET parent_id = parent.id
+FROM categories AS parent
+WHERE parent.slug = 'tro-choi'
+  AND child.slug IN ('steam', 'game-account')
+  AND child.parent_id IS DISTINCT FROM parent.id;
+
+UPDATE categories AS child
+SET parent_id = parent.id
+FROM categories AS parent
+WHERE parent.slug = 'khac-tong-hop'
+  AND child.slug = 'other'
+  AND child.parent_id IS DISTINCT FROM parent.id;
 
 INSERT INTO wallets (user_id, available_balance, hold_balance, status, is_platform, version, updated_at)
 SELECT NULL, 0, 0, 'ACTIVE', true, 0, NOW()
