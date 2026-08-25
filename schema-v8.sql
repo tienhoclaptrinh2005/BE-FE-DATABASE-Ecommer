@@ -12,7 +12,11 @@
 --   [PRE] PRE_ORDER trừ ví NGAY lúc checkout (không chờ shop accept)
 --   [HOLD] 1 OrderItem = 1 HoldRelease = 1 FeeLedger
 --   [SHOP] 1 User = 1 Shop; level giới hạn số sản phẩm (allowed_product_count)
---   [IDEM] UNIQUE (user_id, idempotency_key) trên orders — chặn double-submit ngay tại DB
+--   [IMG] 1 Product = 1 ảnh tại products.thumbnail_url; variant không có ảnh riêng
+--   [VIS] Sản phẩm công khai chỉ khi Product + Shop + chủ Shop cùng ACTIVE;
+--         ban/unban không ghi đè status riêng của từng Product
+--   [VAR] Tên variant duy nhất trong từng Product sau khi TRIM và bỏ phân biệt hoa/thường
+--   [IDEM] Một checkout = một idempotency_keys; nhiều orders cùng tham chiếu checkout_request_id
 --   [DLV] Nội dung giao khách thống nhất tên delivery_content:
 --         INSTANT   : import TXT, 1 dòng = 1 asset → digital_assets.delivery_content;
 --                     khi giao SNAPSHOT nguyên văn vào asset_delivery_logs.delivery_content_snapshot
@@ -78,7 +82,8 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS user_roles (
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     role_id BIGINT NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
-    PRIMARY KEY (user_id, role_id)
+    PRIMARY KEY (user_id, role_id),
+    CONSTRAINT uq_user_roles_one_role_per_user UNIQUE (user_id)
 );
 
 CREATE TABLE IF NOT EXISTS refresh_tokens (
@@ -293,12 +298,21 @@ CREATE TABLE IF NOT EXISTS shops (
     total_orders     INT           NOT NULL DEFAULT 0,
     total_disputes   INT           NOT NULL DEFAULT 0,
     dispute_rate     NUMERIC(5,2)  NOT NULL DEFAULT 0,
-    status           VARCHAR(30)   NOT NULL DEFAULT 'ACTIVE'
-                         CHECK (status IN ('ACTIVE','SUSPENDED','CLOSED','INACTIVE','BANNED')),
+    status           VARCHAR(30)   NOT NULL DEFAULT 'PENDING'
+                         CHECK (status IN ('PENDING','ACTIVE','REJECTED','SUSPENDED','CLOSED','INACTIVE','BANNED')),
     rating_avg       NUMERIC(3,2)  NOT NULL DEFAULT 0,
     created_at       TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
     updated_at       TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
+
+-- Migration idempotent cho database đã có bảng shops từ phiên bản trước.
+ALTER TABLE shops ALTER COLUMN status SET DEFAULT 'PENDING';
+ALTER TABLE shops DROP CONSTRAINT IF EXISTS shops_status_check;
+ALTER TABLE shops ADD CONSTRAINT shops_status_check
+    CHECK (status IN ('PENDING','ACTIVE','REJECTED','SUSPENDED','CLOSED','INACTIVE','BANNED'));
+
+CREATE INDEX IF NOT EXISTS idx_shops_public_status_created
+    ON shops(status, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS shop_images (
     id         BIGSERIAL    PRIMARY KEY,
@@ -391,13 +405,48 @@ CREATE TABLE IF NOT EXISTS products (
                              CHECK (status IN ('ACTIVE','INACTIVE','DELETED')),
     sold_count           BIGINT        NOT NULL DEFAULT 0,
     failed_dispute_count BIGINT        NOT NULL DEFAULT 0,
-    stock_count          INT,
     created_at           TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
     updated_at           TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
+
+-- Migration cho database cũ: ảnh duy nhất nằm trực tiếp trên products.
+ALTER TABLE products ADD COLUMN IF NOT EXISTS thumbnail_url VARCHAR(500);
+
+-- Product.stock_count không còn là nguồn dữ liệu; tổng tồn kho được tính từ
+-- SUM(product_variants.stock_count) của các variant ACTIVE.
+ALTER TABLE products DROP COLUMN IF EXISTS stock_count;
+
+-- Nếu database cũ còn product_images, chọn ảnh đầu tiên làm thumbnail rồi đổi tên
+-- bảng thành legacy để bảo toàn dữ liệu thay vì xóa ngay.
+DO $$
+BEGIN
+    IF to_regclass('public.product_images') IS NOT NULL THEN
+        EXECUTE $migration$
+            UPDATE products p
+            SET thumbnail_url = first_image.image_url
+            FROM (
+                SELECT DISTINCT ON (product_id)
+                       product_id,
+                       image_url
+                FROM product_images
+                WHERE NULLIF(BTRIM(image_url), '') IS NOT NULL
+                ORDER BY product_id, sort_order ASC, id ASC
+            ) AS first_image
+            WHERE p.id = first_image.product_id
+              AND NULLIF(BTRIM(p.thumbnail_url), '') IS NULL
+        $migration$;
+
+        IF to_regclass('public.product_images_legacy') IS NULL THEN
+            EXECUTE 'ALTER TABLE public.product_images RENAME TO product_images_legacy';
+        END IF;
+    END IF;
+END $$;
+
 CREATE INDEX IF NOT EXISTS idx_products_shop ON products(shop_id, status);
 CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id, status);
 CREATE INDEX IF NOT EXISTS idx_products_delivery ON products(delivery_type, status);
+CREATE INDEX IF NOT EXISTS idx_products_public_created
+    ON products(created_at DESC) WHERE status = 'ACTIVE';
 
 CREATE TABLE IF NOT EXISTS pre_order_configs (
     id                         BIGSERIAL   PRIMARY KEY,
@@ -413,13 +462,68 @@ CREATE TABLE IF NOT EXISTS pre_order_configs (
 CREATE TABLE IF NOT EXISTS product_variants (
     id            BIGSERIAL     PRIMARY KEY,
     product_id    BIGINT        NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-    name          VARCHAR(100)  NOT NULL,
-    duration_days INT,
-    price         NUMERIC(18,2) NOT NULL CHECK (price >= 0),
+    name          VARCHAR(100)  NOT NULL
+                      CONSTRAINT chk_product_variants_name_not_blank CHECK (BTRIM(name) <> ''),
+    duration_days INT
+                      CONSTRAINT chk_product_variants_duration_positive
+                      CHECK (duration_days IS NULL OR duration_days > 0),
+    price         NUMERIC(18,2) NOT NULL
+                      CONSTRAINT chk_product_variants_price_positive CHECK (price > 0),
     sort_order    INT           NOT NULL DEFAULT 0,
     status        VARCHAR(30)   NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','INACTIVE')),
     stock_count   INT           NOT NULL DEFAULT 0
+                      CONSTRAINT chk_product_variants_stock_nonnegative CHECK (stock_count >= 0)
 );
+
+-- CREATE TABLE IF NOT EXISTS không bổ sung constraint cho bảng đã tồn tại,
+-- nên cần migration idempotent riêng cho database đang chạy.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_product_variants_name_not_blank'
+          AND conrelid = 'product_variants'::regclass
+    ) THEN
+        ALTER TABLE product_variants
+            ADD CONSTRAINT chk_product_variants_name_not_blank
+            CHECK (BTRIM(name) <> '');
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_product_variants_duration_positive'
+          AND conrelid = 'product_variants'::regclass
+    ) THEN
+        ALTER TABLE product_variants
+            ADD CONSTRAINT chk_product_variants_duration_positive
+            CHECK (duration_days IS NULL OR duration_days > 0);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_product_variants_price_positive'
+          AND conrelid = 'product_variants'::regclass
+    ) THEN
+        ALTER TABLE product_variants
+            ADD CONSTRAINT chk_product_variants_price_positive
+            CHECK (price > 0);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_product_variants_stock_nonnegative'
+          AND conrelid = 'product_variants'::regclass
+    ) THEN
+        ALTER TABLE product_variants
+            ADD CONSTRAINT chk_product_variants_stock_nonnegative
+            CHECK (stock_count >= 0);
+    END IF;
+END $$;
+
+-- Một sản phẩm không được có hai biến thể trùng tên sau khi bỏ khoảng trắng
+-- đầu/cuối và không phân biệt hoa/thường. Đây là lớp chống race-condition tại DB.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_product_variants_product_name_normalized
+    ON product_variants(product_id, LOWER(BTRIM(name)));
 
 CREATE TABLE IF NOT EXISTS digital_assets (
     id                  BIGSERIAL    PRIMARY KEY,
@@ -446,13 +550,9 @@ CREATE INDEX IF NOT EXISTS idx_digital_assets_available
 CREATE INDEX IF NOT EXISTS idx_digital_assets_order_item
     ON digital_assets(order_item_id) WHERE order_item_id IS NOT NULL;
 
-CREATE TABLE IF NOT EXISTS product_images (
-    id         BIGSERIAL    PRIMARY KEY,
-    product_id BIGINT       NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-    image_url  VARCHAR(500) NOT NULL,
-    sort_order INT          NOT NULL DEFAULT 0,
-    created_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
+-- Mỗi sản phẩm chỉ dùng một ảnh tại products.thumbnail_url.
+-- Bảng product_images không còn thuộc mô hình; dữ liệu cũ (nếu có) đã được giữ
+-- trong product_images_legacy bởi block migration phía trên.
 
 CREATE TABLE IF NOT EXISTS asset_delivery_logs (
     id                        BIGSERIAL   PRIMARY KEY,
@@ -575,16 +675,19 @@ CREATE TABLE IF NOT EXISTS orders (
     processing_deadline_at TIMESTAMPTZ,
     rejection_reason       TEXT,
     idempotency_key        VARCHAR(100),
+    checkout_request_id    BIGINT,
     version                BIGINT        NOT NULL DEFAULT 0,
     created_at             TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
     updated_at             TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_orders_shop ON orders(shop_id, status);
--- Bản cũ là index thường → KHÔNG enforce idempotency; phải là UNIQUE
 DROP INDEX IF EXISTS idx_orders_user_idem_key;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_orders_user_idem_key ON orders(user_id, idempotency_key)
-    WHERE idempotency_key IS NOT NULL;
+DROP INDEX IF EXISTS uq_orders_user_idem_key;
+CREATE INDEX IF NOT EXISTS idx_orders_processing_deadline
+    ON orders(processing_deadline_at, id) WHERE status = 'PROCESSING';
+CREATE INDEX IF NOT EXISTS idx_orders_approval_deadline
+    ON orders(approval_deadline_at, id) WHERE status = 'WAITING_APPROVAL';
 
 CREATE TABLE IF NOT EXISTS order_items (
     id                 BIGSERIAL     PRIMARY KEY,
@@ -602,9 +705,13 @@ CREATE TABLE IF NOT EXISTS order_items (
     fee_rate_snapshot  NUMERIC(5,4),
     fee_amount         NUMERIC(18,2),
     seller_net_amount  NUMERIC(18,2),
+    refund_status      VARCHAR(20) NOT NULL DEFAULT 'NONE'
+                           CHECK (refund_status IN ('NONE','REFUNDED')),
+    refunded_at        TIMESTAMPTZ,
     created_at         TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
+CREATE INDEX IF NOT EXISTS idx_order_items_refund ON order_items(order_id, refund_status);
 
 -- v8-DLV: delivery_content = nội dung shop giao khách (account/key/tin nhắn), buyer xem lại
 -- vĩnh viễn từ cột này. seller_notes = ghi chú NỘI BỘ, không bao giờ trả cho buyer.
@@ -633,6 +740,8 @@ CREATE TABLE IF NOT EXISTS order_status_logs (
     to_status   VARCHAR(30) NOT NULL,
     changed_by  BIGINT      REFERENCES users(id),
     note        TEXT,
+    -- Entity Java dùng String + @JdbcTypeCode(SqlTypes.JSON), nếu chỉ khai báo
+    -- columnDefinition mà thiếu JdbcTypeCode thì Hibernate sẽ bind VARCHAR và PostgreSQL từ chối.
     meta        JSONB,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -681,7 +790,7 @@ CREATE TABLE IF NOT EXISTS hold_releases (
     status                 VARCHAR(30)   NOT NULL DEFAULT 'HOLDING'
                                CHECK (status IN (
                                    'HOLDING','COMPLAINED','WARRANTY_IN_PROGRESS',
-                                   'DISPUTED','RELEASED','REFUNDED'
+                                   'WAITING_BUYER_CONFIRMATION','DISPUTED','RELEASED','REFUNDED'
                                )),
     scheduled_release_at   TIMESTAMPTZ   NOT NULL,
     released_at            TIMESTAMPTZ,
@@ -732,6 +841,7 @@ CREATE TABLE IF NOT EXISTS platform_fee_logs (
     fee_amount    NUMERIC(18,2) NOT NULL CHECK (fee_amount >= 0),
     changed_by    BIGINT        REFERENCES users(id),
     reason        TEXT,
+    -- Đồng bộ với PlatformFeeLog.meta: String + @JdbcTypeCode(SqlTypes.JSON).
     meta          JSONB,
     created_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
@@ -774,7 +884,10 @@ CREATE TABLE IF NOT EXISTS order_disputes (
     shop_response      TEXT,
     shop_evidence_urls TEXT[],
     status             VARCHAR(30)   NOT NULL DEFAULT 'OPEN'
-                           CHECK (status IN ('OPEN','PROCESSING','BUYER_WIN','SELLER_WIN','PARTIAL_REFUND','CLOSED')),
+                           CHECK (status IN (
+                               'OPEN','WARRANTY_IN_PROGRESS','WAITING_BUYER_CONFIRMATION',
+                               'PROCESSING','BUYER_WIN','SELLER_WIN','CLOSED'
+                           )),
     refund_amount      NUMERIC(18,2),
     admin_note         TEXT,
     resolver_id        BIGINT        REFERENCES users(id),
@@ -783,6 +896,12 @@ CREATE TABLE IF NOT EXISTS order_disputes (
     resolved_at        TIMESTAMPTZ,
     updated_at         TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
+CREATE INDEX IF NOT EXISTS idx_disputes_status_deadline
+    ON order_disputes(status, deadline_at, id);
+CREATE INDEX IF NOT EXISTS idx_disputes_user_created
+    ON order_disputes(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_disputes_shop_created
+    ON order_disputes(shop_id, created_at DESC);
 
 ALTER TABLE platform_fee_ledgers DROP CONSTRAINT IF EXISTS fk_fee_dispute;
 ALTER TABLE platform_fee_ledgers ADD CONSTRAINT fk_fee_dispute
@@ -799,6 +918,17 @@ CREATE TABLE IF NOT EXISTS product_reviews (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ
 );
+-- Bản cũ từng cho phép một user đánh giá cùng sản phẩm nhiều lần qua nhiều item.
+-- Giữ bản ghi cũ nhất trước khi thêm ràng buộc mới để file nâng cấp không bị dừng.
+DELETE FROM product_reviews duplicate_review
+USING product_reviews kept_review
+WHERE duplicate_review.product_id = kept_review.product_id
+  AND duplicate_review.user_id = kept_review.user_id
+  AND duplicate_review.id > kept_review.id;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_product_reviews_product_user
+    ON product_reviews(product_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_product_reviews_public
+    ON product_reviews(product_id, created_at DESC) WHERE is_visible = TRUE;
 
 -- ============================================================
 -- MODULE 10: CHAT / NOTIFICATION / AUDIT / FRAUD / OPS
@@ -911,15 +1041,19 @@ CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox_events(created_at) WHERE
 
 CREATE TABLE IF NOT EXISTS idempotency_keys (
     id             BIGSERIAL    PRIMARY KEY,
-    key_value      VARCHAR(100) NOT NULL UNIQUE,
+    key_value      VARCHAR(100) NOT NULL,
     operation_type VARCHAR(100) NOT NULL,
     user_id        BIGINT       NOT NULL REFERENCES users(id),
+    request_hash   VARCHAR(64)  NOT NULL,
     response_body  JSONB,
     status         VARCHAR(20)  NOT NULL DEFAULT 'PROCESSING'
                        CHECK (status IN ('PROCESSING','DONE','FAILED')),
     expires_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW() + INTERVAL '24 hours',
-    created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_idempotency_user_operation_key
+        UNIQUE (user_id, operation_type, key_value)
 );
+CREATE INDEX IF NOT EXISTS idx_idempotency_expiry ON idempotency_keys(expires_at);
 
 CREATE TABLE IF NOT EXISTS job_logs (
     id              BIGSERIAL    PRIMARY KEY,
@@ -959,6 +1093,67 @@ ALTER TABLE pre_order_items ADD CONSTRAINT chk_pre_order_delivery_content_type
     CHECK (delivery_content_type IS NULL
            OR delivery_content_type IN ('ACCOUNT','KEY','MESSAGE','OTHER'));
 
+-- Checkout/idempotency mới: một request có thể tách thành nhiều order.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS checkout_request_id BIGINT;
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS refund_status VARCHAR(20) NOT NULL DEFAULT 'NONE';
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMPTZ;
+ALTER TABLE idempotency_keys ADD COLUMN IF NOT EXISTS request_hash VARCHAR(64);
+UPDATE idempotency_keys SET request_hash = REPEAT('0', 64) WHERE request_hash IS NULL;
+ALTER TABLE idempotency_keys ALTER COLUMN request_hash SET NOT NULL;
+-- Chuỗi 0 chỉ là sentinel cho dữ liệu legacy không còn payload để băm lại.
+-- Checkout mới luôn truyền SHA-256 thật; không để database tự sinh hash giả.
+ALTER TABLE idempotency_keys ALTER COLUMN request_hash DROP DEFAULT;
+
+ALTER TABLE idempotency_keys DROP CONSTRAINT IF EXISTS idempotency_keys_key_value_key;
+ALTER TABLE idempotency_keys DROP CONSTRAINT IF EXISTS uq_idempotency_user_operation_key;
+ALTER TABLE idempotency_keys ADD CONSTRAINT uq_idempotency_user_operation_key
+    UNIQUE (user_id, operation_type, key_value);
+
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS fk_orders_checkout_request;
+ALTER TABLE orders ADD CONSTRAINT fk_orders_checkout_request
+    FOREIGN KEY (checkout_request_id) REFERENCES idempotency_keys(id);
+
+ALTER TABLE order_items DROP CONSTRAINT IF EXISTS order_items_refund_status_check;
+ALTER TABLE order_items ADD CONSTRAINT order_items_refund_status_check
+    CHECK (refund_status IN ('NONE','REFUNDED'));
+
+ALTER TABLE hold_releases DROP CONSTRAINT IF EXISTS hold_releases_status_check;
+ALTER TABLE hold_releases ADD CONSTRAINT hold_releases_status_check
+    CHECK (status IN (
+        'HOLDING','COMPLAINED','WARRANTY_IN_PROGRESS','WAITING_BUYER_CONFIRMATION',
+        'DISPUTED','RELEASED','REFUNDED'
+    ));
+
+ALTER TABLE order_disputes DROP CONSTRAINT IF EXISTS order_disputes_status_check;
+ALTER TABLE order_disputes ADD CONSTRAINT order_disputes_status_check
+    CHECK (status IN (
+        'OPEN','WARRANTY_IN_PROGRESS','WAITING_BUYER_CONFIRMATION',
+        'PROCESSING','BUYER_WIN','SELLER_WIN','CLOSED'
+    ));
+
+DROP INDEX IF EXISTS uq_orders_user_idem_key;
+CREATE INDEX IF NOT EXISTS idx_orders_processing_deadline
+    ON orders(processing_deadline_at, id) WHERE status = 'PROCESSING';
+CREATE INDEX IF NOT EXISTS idx_orders_approval_deadline
+    ON orders(approval_deadline_at, id) WHERE status = 'WAITING_APPROVAL';
+CREATE INDEX IF NOT EXISTS idx_order_items_refund ON order_items(order_id, refund_status);
+CREATE INDEX IF NOT EXISTS idx_disputes_status_deadline
+    ON order_disputes(status, deadline_at, id);
+CREATE INDEX IF NOT EXISTS idx_disputes_user_created
+    ON order_disputes(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_disputes_shop_created
+    ON order_disputes(shop_id, created_at DESC);
+DELETE FROM product_reviews duplicate_review
+USING product_reviews kept_review
+WHERE duplicate_review.product_id = kept_review.product_id
+  AND duplicate_review.user_id = kept_review.user_id
+  AND duplicate_review.id > kept_review.id;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_product_reviews_product_user
+    ON product_reviews(product_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_product_reviews_public
+    ON product_reviews(product_id, created_at DESC) WHERE is_visible = TRUE;
+CREATE INDEX IF NOT EXISTS idx_idempotency_expiry ON idempotency_keys(expires_at);
+
 -- DB cũ có thể còn cột delivered_asset_data / shop_note trên pre_order_items:
 -- giữ nguyên để đối soát, chuyển dữ liệu sang delivery_content xong thì DROP thủ công.
 
@@ -974,6 +1169,31 @@ INSERT INTO roles (name, description) VALUES
     ('SELLER',      'Người bán hàng'),
     ('BUYER',       'Người mua hàng')
 ON CONFLICT (name) DO NOTHING;
+
+-- Mỗi tài khoản chỉ giữ một role. Khi nâng cấp database cũ có nhiều role,
+-- giữ role có quyền cao nhất theo thứ tự SUPER_ADMIN > ADMIN > SELLER > BUYER.
+DELETE FROM user_roles lower_role
+USING user_roles higher_role, roles lower_definition, roles higher_definition
+WHERE lower_role.user_id = higher_role.user_id
+  AND lower_role.role_id = lower_definition.id
+  AND higher_role.role_id = higher_definition.id
+  AND CASE lower_definition.name
+        WHEN 'SUPER_ADMIN' THEN 4
+        WHEN 'ADMIN' THEN 3
+        WHEN 'SELLER' THEN 2
+        WHEN 'BUYER' THEN 1
+        ELSE 0
+      END
+      < CASE higher_definition.name
+          WHEN 'SUPER_ADMIN' THEN 4
+          WHEN 'ADMIN' THEN 3
+          WHEN 'SELLER' THEN 2
+          WHEN 'BUYER' THEN 1
+          ELSE 0
+        END;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_user_roles_one_role_per_user
+    ON user_roles(user_id);
 
 INSERT INTO level_configs (level, label, min_spent, allowed_product_count, description) VALUES
     (1, 'Đồng',      0,           5,   'Shop đăng tối đa 5 sản phẩm'),
