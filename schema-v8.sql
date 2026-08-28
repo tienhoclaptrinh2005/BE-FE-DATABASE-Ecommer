@@ -682,6 +682,10 @@ CREATE TABLE IF NOT EXISTS orders (
 );
 CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_orders_shop ON orders(shop_id, status);
+-- Keyset/cursor pagination cho lịch sử mua hàng: không COUNT, không OFFSET sâu.
+CREATE INDEX IF NOT EXISTS idx_orders_user_cursor
+    ON orders(user_id, placed_at DESC, id DESC);
+DROP INDEX IF EXISTS idx_orders_user_placed_at;
 DROP INDEX IF EXISTS idx_orders_user_idem_key;
 DROP INDEX IF EXISTS uq_orders_user_idem_key;
 CREATE INDEX IF NOT EXISTS idx_orders_processing_deadline
@@ -891,10 +895,19 @@ CREATE TABLE IF NOT EXISTS order_disputes (
     refund_amount      NUMERIC(18,2),
     admin_note         TEXT,
     resolver_id        BIGINT        REFERENCES users(id),
+    closed_reason      VARCHAR(40),
     created_at         TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
     deadline_at        TIMESTAMPTZ   NOT NULL,
     resolved_at        TIMESTAMPTZ,
-    updated_at         TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+    updated_at         TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    CONSTRAINT order_disputes_closed_reason_check CHECK (
+        (status = 'CLOSED'
+            AND closed_reason IS NOT NULL
+            AND closed_reason IN (
+                'BUYER_WITHDREW','BUYER_ACCEPTED_WARRANTY','BUYER_CONFIRMATION_TIMEOUT'
+            ))
+        OR (status <> 'CLOSED' AND closed_reason IS NULL)
+    )
 );
 CREATE INDEX IF NOT EXISTS idx_disputes_status_deadline
     ON order_disputes(status, deadline_at, id);
@@ -902,6 +915,8 @@ CREATE INDEX IF NOT EXISTS idx_disputes_user_created
     ON order_disputes(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_disputes_shop_created
     ON order_disputes(shop_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_disputes_order_status
+    ON order_disputes(order_id, status);
 
 ALTER TABLE platform_fee_ledgers DROP CONSTRAINT IF EXISTS fk_fee_dispute;
 ALTER TABLE platform_fee_ledgers ADD CONSTRAINT fk_fee_dispute
@@ -1097,6 +1112,7 @@ ALTER TABLE pre_order_items ADD CONSTRAINT chk_pre_order_delivery_content_type
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS checkout_request_id BIGINT;
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS refund_status VARCHAR(20) NOT NULL DEFAULT 'NONE';
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMPTZ;
+ALTER TABLE order_disputes ADD COLUMN IF NOT EXISTS closed_reason VARCHAR(40);
 ALTER TABLE idempotency_keys ADD COLUMN IF NOT EXISTS request_hash VARCHAR(64);
 UPDATE idempotency_keys SET request_hash = REPEAT('0', 64) WHERE request_hash IS NULL;
 ALTER TABLE idempotency_keys ALTER COLUMN request_hash SET NOT NULL;
@@ -1131,6 +1147,31 @@ ALTER TABLE order_disputes ADD CONSTRAINT order_disputes_status_check
         'PROCESSING','BUYER_WIN','SELLER_WIN','CLOSED'
     ));
 
+-- Các bản CLOSED cũ chưa lưu lý do: nhận diện timeout qua system note, còn lại là buyer chấp nhận.
+UPDATE order_disputes
+SET closed_reason = CASE
+    WHEN admin_note = 'Hệ thống đóng do buyer không phản hồi đúng hạn'
+        THEN 'BUYER_CONFIRMATION_TIMEOUT'
+    ELSE 'BUYER_ACCEPTED_WARRANTY'
+END
+WHERE status = 'CLOSED'
+  AND closed_reason IS NULL;
+UPDATE order_disputes
+SET closed_reason = NULL
+WHERE status <> 'CLOSED'
+  AND closed_reason IS NOT NULL;
+
+ALTER TABLE order_disputes DROP CONSTRAINT IF EXISTS order_disputes_closed_reason_check;
+ALTER TABLE order_disputes ADD CONSTRAINT order_disputes_closed_reason_check
+    CHECK (
+        (status = 'CLOSED'
+            AND closed_reason IS NOT NULL
+            AND closed_reason IN (
+                'BUYER_WITHDREW','BUYER_ACCEPTED_WARRANTY','BUYER_CONFIRMATION_TIMEOUT'
+            ))
+        OR (status <> 'CLOSED' AND closed_reason IS NULL)
+    );
+
 DROP INDEX IF EXISTS uq_orders_user_idem_key;
 CREATE INDEX IF NOT EXISTS idx_orders_processing_deadline
     ON orders(processing_deadline_at, id) WHERE status = 'PROCESSING';
@@ -1143,6 +1184,8 @@ CREATE INDEX IF NOT EXISTS idx_disputes_user_created
     ON order_disputes(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_disputes_shop_created
     ON order_disputes(shop_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_disputes_order_status
+    ON order_disputes(order_id, status);
 DELETE FROM product_reviews duplicate_review
 USING product_reviews kept_review
 WHERE duplicate_review.product_id = kept_review.product_id
