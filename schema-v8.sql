@@ -295,21 +295,36 @@ CREATE TABLE IF NOT EXISTS shops (
     shop_avatar_url  VARCHAR(500),
     shop_cover_url   VARCHAR(500),
     description      TEXT,
+    contact_info     VARCHAR(255),
+    application_reason VARCHAR(500),
     total_orders     INT           NOT NULL DEFAULT 0,
     total_disputes   INT           NOT NULL DEFAULT 0,
     dispute_rate     NUMERIC(5,2)  NOT NULL DEFAULT 0,
     status           VARCHAR(30)   NOT NULL DEFAULT 'PENDING'
-                         CHECK (status IN ('PENDING','ACTIVE','REJECTED','SUSPENDED','CLOSED','INACTIVE','BANNED')),
+                         CHECK (status IN ('PENDING','ACTIVE','REJECTED','BANNED')),
     rating_avg       NUMERIC(3,2)  NOT NULL DEFAULT 0,
+    version          BIGINT        NOT NULL DEFAULT 0,
     created_at       TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
     updated_at       TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
 
 -- Migration idempotent cho database đã có bảng shops từ phiên bản trước.
 ALTER TABLE shops ALTER COLUMN status SET DEFAULT 'PENDING';
+ALTER TABLE shops ADD COLUMN IF NOT EXISTS contact_info VARCHAR(255);
+ALTER TABLE shops ADD COLUMN IF NOT EXISTS application_reason VARCHAR(500);
+-- Tách thành nhiều bước để chạy an toàn cả khi Hibernate đã tạo dở cột version.
+ALTER TABLE shops ADD COLUMN IF NOT EXISTS version BIGINT;
+UPDATE shops SET version = 0 WHERE version IS NULL;
+ALTER TABLE shops ALTER COLUMN version SET DEFAULT 0;
+ALTER TABLE shops ALTER COLUMN version SET NOT NULL;
 ALTER TABLE shops DROP CONSTRAINT IF EXISTS shops_status_check;
+-- Các trạng thái khóa/ngừng cũ đều chuyển về BANNED để tiếp tục ẩn shop
+-- và cho phép admin mở lại bằng ACTIVE.
+UPDATE shops
+SET status = 'BANNED'
+WHERE status IN ('INACTIVE', 'SUSPENDED', 'CLOSED');
 ALTER TABLE shops ADD CONSTRAINT shops_status_check
-    CHECK (status IN ('PENDING','ACTIVE','REJECTED','SUSPENDED','CLOSED','INACTIVE','BANNED'));
+    CHECK (status IN ('PENDING','ACTIVE','REJECTED','BANNED'));
 
 CREATE INDEX IF NOT EXISTS idx_shops_public_status_created
     ON shops(status, created_at DESC);
