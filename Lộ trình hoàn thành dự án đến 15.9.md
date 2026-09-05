@@ -111,11 +111,11 @@ Nếu UI đang có nút cho tính năng chưa làm, phải **ẩn hoặc ghi “
 
 ### Điều kiện hoàn thành ngày 05/09
 
-- [ ] Không còn URL bị lặp segment.
-- [ ] Swagger phản ánh đúng route thực tế.
-- [ ] Frontend không còn gọi route cũ.
-- [ ] Maven Wrapper chạy được.
-- [ ] Có baseline test/lint/build rõ ràng.
+- [x] Không còn URL bị lặp segment.
+- [x] Swagger phản ánh đúng route thực tế.
+- [x] Frontend không còn gọi route cũ.
+- [x] Maven Wrapper chạy được.
+- [x] Có baseline test/lint/build rõ ràng.
 
 ---
 
@@ -500,7 +500,7 @@ Nếu còn lỗi liên quan tiền, quyền, mất dữ liệu, asset trùng ho�
 
 | Ngày | Kết quả bắt buộc | Trạng thái | Lỗi P0 | Lỗi P1 | Ghi chú |
 |---|---|---|---:|---:|---|
-| 05/09 | Contract/OpenAPI/test baseline | ⬜ Chưa làm | 0 | 0 | |
+| 05/09 | Contract/OpenAPI/test baseline | ✅ Hoàn thành | 0 | 0 | 50/50 backend test, frontend lint/build xanh; xem `Baseline kiểm thử 05.09.2026.md`. |
 | 06/09 | Backend admin | ⬜ Chưa làm | 0 | 0 | |
 | 07/09 | Frontend admin | ⬜ Chưa làm | 0 | 0 | |
 | 08/09 | Backend seller product | ⬜ Chưa làm | 0 | 0 | |

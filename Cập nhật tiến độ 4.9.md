@@ -303,7 +303,7 @@ Seller:
 - `POST /api/v1/seller/products`
 - `PUT /api/v1/seller/products/{productId}`
 - `DELETE /api/v1/seller/products/{productId}`
-- `POST /api/v1/seller/products/products/assets/inventory`
+- `POST /api/v1/seller/products/assets/inventory`
 - `POST /api/v1/seller/product-variants`
 - `PUT /api/v1/seller/product-variants/{variantId}`
 - `GET /api/v1/seller/digital-assets/variant/{variantId}`
@@ -324,7 +324,7 @@ Seller:
 
 Buyer:
 
-- `POST /api/v1/checkout/checkout`
+- `POST /api/v1/checkout`
 - `GET /api/v1/orders`
 - `GET /api/v1/orders/{orderCode}`
 - `GET /api/v1/orders/{orderCode}/assets`
@@ -354,19 +354,19 @@ Seller:
 
 Admin:
 
-- `GET /api/admin/fee-configs`
-- `GET /api/admin/fee-configs/active`
-- `POST /api/admin/fee-configs`
-- `PUT /api/admin/fee-configs/change-rate`
-- `GET /api/admin/fee-configs/ledgers`
-- `GET /api/admin/fee-configs/ledgers/{ledgerId}`
-- `GET /api/admin/fee-configs/summaries`
+- `GET /api/v1/admin/fee-configs`
+- `GET /api/v1/admin/fee-configs/active`
+- `POST /api/v1/admin/fee-configs`
+- `PUT /api/v1/admin/fee-configs/change-rate`
+- `GET /api/v1/admin/fee-configs/ledgers`
+- `GET /api/v1/admin/fee-configs/ledgers/{ledgerId}`
+- `GET /api/v1/admin/fee-configs/summaries`
 
 Seller:
 
-- `GET /api/seller/fees`
-- `GET /api/seller/fees/summary`
-- `GET /api/seller/fees/{ledgerId}`
+- `GET /api/v1/seller/fees`
+- `GET /api/v1/seller/fees/summary`
+- `GET /api/v1/seller/fees/{ledgerId}`
 
 ### 5.10. Dispute — 14 API
 
@@ -432,16 +432,16 @@ Admin:
 
 ## 7. Phần còn thiếu hoặc chưa hoàn chỉnh
 
-### P0 — Phải sửa trước khi phát triển thêm
+### P0 — Trạng thái sau baseline 05/09/2026
 
-1. **Chuẩn hóa URL API.**
-   - Fee đang dùng `/api/admin/**` và `/api/seller/**` trong khi phần còn lại dùng `/api/v1/**`.
-   - Upload inventory hiện ghép thành `/api/v1/seller/products/products/assets/inventory`; có chữ `products` lặp.
-   - Checkout hiện là `/api/v1/checkout/checkout`; nên rút gọn thành `/api/v1/checkout` hoặc thống nhất rõ contract.
-2. **Chuẩn hóa response envelope và lỗi.** Một số controller trả `ApiResponse<T>`, một số trả thẳng `Page<T>`/DTO.
-3. **Tạo OpenAPI/Swagger làm contract duy nhất** để frontend không tiếp tục lệch route và DTO.
-4. **Chốt schema/migration.** `schema-v8.sql` hiện là full schema và có một số ALTER idempotent, nhưng chưa có version migration chính thức.
-5. **Sửa Maven Wrapper trên máy/CI.** Trong lần kiểm tra ngày 04/09, frontend lint chạy thành công nhưng Maven Wrapper trong môi trường kiểm tra báo `Cannot index into a null array`, nên chưa thể xác nhận lại toàn bộ backend test ở lần chốt này.
+Đã hoàn thành và được ghi nhận trong `Baseline kiểm thử 05.09.2026.md`:
+
+1. **Đã chuẩn hóa URL API** cho checkout, upload inventory và fee về `/api/v1/**`.
+2. **Đã chuẩn hóa dispute response/pagination và global error envelope.**
+3. **Đã thêm OpenAPI/Swagger và contract test** để kiểm tra route chuẩn/route cũ.
+4. **Đã sửa Maven Wrapper và thêm CI** cho backend/frontend; 47 test nền và 3 contract test mới đều xanh.
+
+Việc còn mở: **chốt chiến lược schema/migration production.** `schema-v8.sql` hiện là full schema và có một số ALTER idempotent, nhưng chưa có version migration chính thức.
 
 ### P1 — Hoàn thiện admin MVP
 
