@@ -18,7 +18,7 @@
 > - Không Favorite shop
 > - Có giỏ hàng đầy đủ
 > - Không admin waive phí
-> - Checkout mua hàng chỉ **WALLET** (nạp qua VNPay/MoMo — gateway chỉ dùng để nạp)
+> - Checkout mua hàng chỉ **WALLET** (nạp qua SePay — gateway chỉ dùng để nạp)
 > - Fee status: `PENDING | COLLECTED | CANCELLED | ADJUSTED`
 
 ```
@@ -42,7 +42,7 @@ commercehub-frontend/                                 -- [TODO] scaffold
 │   ├── placeholder-avatar.png
 │   ├── placeholder-shop.png
 │   └── icons/
-│       ├── vnpay.svg
+│       ├── sepay.svg
 │       ├── momo.svg
 │       └── zalopay.svg
 │
@@ -94,7 +94,7 @@ commercehub-frontend/                                 -- [TODO] scaffold
     │   │   │       └── dispute/page.tsx
     │   │   ├── wallet/
     │   │   │   ├── page.tsx
-    │   │   │   ├── deposit/page.tsx                  -- nạp VNPay/MoMo (không thanh toán order)
+    │   │   │   ├── deposit/page.tsx                  -- nạp qua SePay (không thanh toán order)
     │   │   │   └── withdraw/page.tsx
     │   │   ├── notifications/page.tsx
     │   │   ├── chat/

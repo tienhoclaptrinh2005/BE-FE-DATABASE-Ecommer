@@ -262,7 +262,7 @@ commercehub-backend/
     │   │   │   │   └── PlatformWalletInitializer.java
     │   │   │   ├── controller/
     │   │   │   │   ├── AdminWithdrawalController.java
-    │   │   │   │   ├── DepositController.java         -- VNPay IPN + amount match
+    │   │   │   │   ├── DepositController.java         -- SePay checkout/IPN + amount match
     │   │   │   │   ├── WalletController.java
     │   │   │   │   └── WithdrawalController.java
     │   │   │   ├── dto/request|response/ …
@@ -284,18 +284,18 @@ commercehub-backend/
     │   │   │       ├── WalletTransactionService.java
     │   │   │       └── WithdrawalService.java
     │   │   │
-    │   │   ├── payment/                              -- [TODO] (hiện VNPay nằm trong DepositController)
+    │   │   ├── payment/                              -- [TODO] nếu tách gateway khỏi wallet module
     │   │   │   ├── controller/PaymentController.java
     │   │   │   ├── dto/ …
     │   │   │   ├── entity/Payment.java
     │   │   │   ├── service/
     │   │   │   │   ├── PaymentService.java
-    │   │   │   │   ├── VnPayService.java
+    │   │   │   │   ├── SePayGatewayService.java
     │   │   │   │   ├── MomoService.java
     │   │   │   │   ├── ZaloPayService.java
     │   │   │   │   └── PaymentCallbackService.java
     │   │   │   └── client/
-    │   │   │       ├── VnPayClient.java
+    │   │   │       ├── SePayClient.java
     │   │   │       ├── MomoClient.java
     │   │   │       └── ZaloPayClient.java
     │   │   │
@@ -501,7 +501,7 @@ commercehub-backend/
 ## Luồng tiền (khớp code)
 
 ```
-Nạp ví (VNPay IPN, đối chiếu amount)
+Nạp ví (SePay checkout + IPN SECRET_KEY, đối chiếu amount và transaction id)
   → Checkout (cart hoặc /checkout) trừ WALLET ngay
   → holdForSeller(total)
   → mỗi OrderItem: HoldRelease + FeeLedger (PENDING), fee snapshot 4% CEILING

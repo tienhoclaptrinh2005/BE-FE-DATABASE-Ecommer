@@ -139,8 +139,9 @@ CREATE TABLE IF NOT EXISTS deposits (
     user_id          BIGINT        NOT NULL REFERENCES users(id),
     wallet_id        BIGINT        NOT NULL REFERENCES wallets(id),
     amount           NUMERIC(18,2) NOT NULL CHECK (amount > 0),
-    provider         VARCHAR(30)   NOT NULL CHECK (provider IN ('VNPAY','MOMO','ZALOPAY')),
+    provider         VARCHAR(30)   NOT NULL CHECK (provider IN ('SEPAY','VNPAY','MOMO','ZALOPAY')),
     transaction_code VARCHAR(100)  UNIQUE,
+    provider_transaction_id VARCHAR(100),
     idempotency_key  VARCHAR(100)  UNIQUE,
     status           VARCHAR(30)   NOT NULL DEFAULT 'PENDING'
                          CHECK (status IN ('PENDING','SUCCESS','FAILED')),
@@ -148,6 +149,18 @@ CREATE TABLE IF NOT EXISTS deposits (
     created_at       TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_deposits_user ON deposits(user_id, created_at DESC);
+
+-- Nâng cấp database đã tồn tại từ VNPay sang SePay; giữ VNPAY để đọc lịch sử cũ.
+ALTER TABLE deposits
+    ADD COLUMN IF NOT EXISTS provider_transaction_id VARCHAR(100);
+ALTER TABLE deposits
+    DROP CONSTRAINT IF EXISTS deposits_provider_check;
+ALTER TABLE deposits
+    ADD CONSTRAINT deposits_provider_check
+        CHECK (provider IN ('SEPAY','VNPAY','MOMO','ZALOPAY'));
+CREATE UNIQUE INDEX IF NOT EXISTS uq_deposits_provider_transaction
+    ON deposits(provider_transaction_id)
+    WHERE provider_transaction_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS withdrawals (
     id              BIGSERIAL     PRIMARY KEY,
@@ -677,7 +690,7 @@ CREATE TABLE IF NOT EXISTS orders (
     status                 VARCHAR(30)   NOT NULL DEFAULT 'PENDING',
     payment_status         VARCHAR(30)   NOT NULL DEFAULT 'UNPAID'
                                CHECK (payment_status IN ('UNPAID','PAID','REFUNDED','PARTIAL_REFUND')),
-    -- v8: mua hàng CHỈ WALLET (VNPAY/MOMO/ZALOPAY chỉ dùng để NẠP ví — xem deposits.provider)
+    -- v8: mua hàng CHỈ WALLET (SEPAY/VNPAY lịch sử/MOMO/ZALOPAY chỉ dùng để NẠP ví)
     payment_method         VARCHAR(30)   NOT NULL DEFAULT 'WALLET'
                                CHECK (payment_method = 'WALLET'),
     subtotal_amount        NUMERIC(18,2) NOT NULL,
@@ -1344,7 +1357,7 @@ COMMIT;
 -- ============================================================
 -- TỔNG KẾT LUỒNG TIỀN v8
 -- ============================================================
--- A. NẠP TIỀN: VNPay IPN → đối chiếu amount → DEPOSIT vào ví buyer
+-- A. NẠP TIỀN: SePay IPN → đối chiếu amount → DEPOSIT vào ví buyer
 -- B. CHECKOUT (cart hoặc buy-now): luôn WALLET
 --      buyer.available -= total
 --      seller.hold     += total

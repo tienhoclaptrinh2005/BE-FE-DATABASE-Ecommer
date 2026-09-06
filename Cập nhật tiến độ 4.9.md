@@ -19,7 +19,7 @@ Mốc dự kiến nếu một người phát triển tập trung khoảng 6–8 
 
 - **23/10/2026:** hoàn thành Release Candidate của MVP.
 - **24–25/10/2026:** chạy UAT và sửa lỗi chặn phát hành.
-- **26/10/2026:** có thể đưa MVP lên production nếu VNPay, domain, SSL, email và máy chủ đã sẵn sàng.
+- **26/10/2026:** có thể đưa MVP lên production nếu SePay, domain, SSL, email và máy chủ đã sẵn sàng.
 - **30/11/2026:** hoàn thành nhóm tính năng mở rộng chưa cần thiết cho MVP như chat realtime, Super Admin quản lý admin, marketing nâng cao và risk/audit nâng cao.
 
 Các tỷ lệ trên là ước tính theo tính năng và độ sẵn sàng vận hành, không phải tỷ lệ số dòng code.
@@ -125,7 +125,7 @@ SUPER_ADMIN > ADMIN > BUYER
 - Tải tài sản số dạng TXT cho đơn giao ngay đã mua.
 - Buyer có thể tạo, xem, chuyển admin, xác nhận bảo hành và tự rút khiếu nại theo state machine.
 - Ví buyer hiển thị số dư thật, lịch sử biến động số dư và lịch sử nạp tiền thật.
-- Trang nạp tiền VNPay đã có giao diện và API tạo giao dịch/IPN.
+- Trang nạp tiền SePay đã có giao diện và API tạo checkout/IPN.
 - Trang đăng ký seller `/seller-register` đã kết nối backend.
 - Trang liên hệ và trang 404 đã có giao diện; form liên hệ hiện vẫn là mock.
 
@@ -346,7 +346,7 @@ Seller:
 - `GET /api/v1/seller/wallet/transactions`
 - `GET /api/v1/wallet/deposit`
 - `POST /api/v1/wallet/deposit`
-- `GET /api/v1/wallet/deposit/vnpay-ipn`
+- `POST /api/v1/wallet/deposit/sepay-ipn`
 - `POST /api/v1/wallet/withdraw`
 - `PUT /api/v1/admin/withdrawals/{id}/process`
 
@@ -475,7 +475,7 @@ Backend đã có một phần nhưng frontend còn thiếu:
 
 - Hoàn thiện forgot password, reset password và verify email. Security config đã whitelist route nhưng chưa có controller tương ứng.
 - Chốt nghiệp vụ voucher: database có bảng nhưng Java module/API chưa được triển khai. Nếu chưa làm voucher ở MVP thì phải bỏ/ẩn ô voucher trên UI.
-- Hoàn thiện kết quả VNPay sandbox: trang return/cancel, đối soát IPN, idempotency và retry.
+- Hoàn thiện kết quả SePay sandbox: success/error/cancel, đối soát IPN, idempotency và retry.
 - Lịch sử withdrawal/deposit nên có trạng thái và trang chi tiết nhất quán.
 - Chuẩn hóa modal thành công/lỗi/xác nhận cho mọi thao tác ghi dữ liệu.
 
@@ -501,7 +501,7 @@ Không được coi là “đã làm” chỉ vì schema có bảng. Các nhóm 
 - Kiểm tra `email_verified` Google end-to-end và log sự kiện xác thực quan trọng.
 - Lưu ảnh/file trên S3/MinIO/CDN; validate MIME, dung lượng và quyền truy cập.
 - Log có cấu trúc và che token, secret, buyer input, delivery content.
-- Metrics/alert cho lỗi thanh toán, scheduler, deadlock, queue/outbox và callback VNPay.
+- Metrics/alert cho lỗi thanh toán, scheduler, deadlock, queue/outbox và callback SePay.
 - Backup PostgreSQL tự động và diễn tập restore.
 - CI/CD, Docker, health/readiness probe và rollback.
 - Kế hoạch tạo partition mới cho `wallet_transactions`; schema hiện có partition theo tháng và default partition nhưng chưa thấy job xoay partition tự động.
@@ -589,7 +589,7 @@ Tiêu chí hoàn thành: seller có thể từ đăng ký shop đến đăng s�
 ### Đợt 3 — Khép kín buyer/payment: 22/09–28/09/2026
 
 - 22/09: forgot/reset password và verify email.
-- 23–24/09: VNPay return/IPN/idempotency/reconciliation.
+- 23–24/09: SePay callback/IPN/idempotency/reconciliation.
 - 25–26/09: quyết định làm voucher MVP hoặc ẩn hoàn toàn UI voucher; nếu làm thì hoàn thiện reservation/consume/release.
 - 27/09: đồng bộ modal và trạng thái lỗi toàn bộ thao tác ghi.
 - 28/09: test E2E buyer từ nạp tiền đến mua, nhận hàng, khiếu nại và hoàn tiền.
@@ -622,7 +622,7 @@ Tiêu chí hoàn thành: seller có thể từ đăng ký shop đến đăng s�
 - 17/10: Docker/CI/CD và environment staging.
 - 18/10: monitoring, log, alert và health check.
 - 19/10: backup/restore database và rollback release.
-- 20/10: smoke test staging với VNPay sandbox.
+- 20/10: smoke test staging với SePay sandbox.
 
 ### Đợt 8 — Release Candidate và phát hành: 21/10–26/10/2026
 
@@ -675,7 +675,7 @@ Tiêu chí hoàn thành: seller có thể từ đăng ký shop đến đăng s�
 - [ ] Có dashboard log/metrics/alert.
 - [ ] Có health/readiness probe.
 - [ ] Có rollback release và runbook xử lý sự cố thanh toán.
-- [ ] VNPay sandbox đã test create, return, IPN lặp, IPN sai chữ ký và timeout.
+- [ ] SePay sandbox đã test checkout, callback, IPN lặp, IPN sai secret và timeout.
 
 ---
 
@@ -687,7 +687,7 @@ Thứ tự đề xuất từ ngày 05/09/2026:
 2. Hoàn thiện admin shop/user/withdrawal trước, vì đây là điểm chặn vận hành lớn nhất.
 3. Thay seller dashboard mock bằng API aggregate thật.
 4. Xây trang seller quản lý sản phẩm và đơn hàng.
-5. Chốt VNPay và luồng đối soát tiền.
+5. Chốt SePay và luồng đối soát tiền.
 6. Sau khi ba role chạy khép kín mới triển khai notification, voucher/chat và tính năng mở rộng.
 
 Không nên ưu tiên giao diện marketing mới hoặc module mở rộng trước khi admin và seller có thể vận hành luồng cốt lõi hoàn toàn bằng dữ liệu thật.
@@ -713,7 +713,7 @@ Không cần xóa toàn bộ database chỉ để nhận các thay đổi này n
 Lịch trên chỉ giữ được nếu:
 
 - phạm vi MVP không bổ sung module lớn mới giữa chừng;
-- có tài khoản VNPay sandbox/merchant và thông tin callback đúng;
+- có tài khoản SePay sandbox/merchant, IPN secret và thông tin callback đúng;
 - chốt sớm dịch vụ email, object storage, domain và máy chủ;
 - một người làm tập trung 6–8 giờ/ngày;
 - lỗi P0 phát hiện trong UAT được ưu tiên hơn thay đổi giao diện nhỏ.

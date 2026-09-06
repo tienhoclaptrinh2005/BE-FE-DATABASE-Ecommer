@@ -323,7 +323,7 @@ Xóa toàn bộ mock data khỏi seller dashboard.
 
 ---
 
-## Ngày 12/09/2026 — Khép kín BUYER, auth và VNPay
+## Ngày 12/09/2026 — Khép kín BUYER, auth và SePay
 
 ### Mục tiêu
 
@@ -343,7 +343,7 @@ Buyer đi được toàn bộ hành trình mà không gặp route giả hoặc d
 - Kiểm tra hết kho phải hiển thị “Hết hàng”.
 - Kiểm tra order code thống nhất từ modal thành công đến URL lịch sử đơn.
 - Kiểm tra ownership của order, asset và dispute.
-- Hoàn thiện VNPay create/return/IPN/idempotency.
+- Hoàn thiện SePay checkout/callback/IPN/idempotency.
 - Lịch sử nạp tiền và biến động số dư phải khớp wallet transaction.
 - Chốt voucher:
   - nếu đủ thời gian thì triển khai end-to-end;
@@ -438,7 +438,7 @@ Chỉ kiểm thử và sửa lỗi; không thêm chức năng mới.
 - Frontend lint và production build.
 - E2E cho ba role.
 - Concurrent checkout/refund/resolve/withdrawal.
-- VNPay IPN đúng, sai chữ ký và gửi lặp.
+- SePay IPN đúng, sai secret và gửi lặp.
 - Smoke test staging.
 
 ### Điều kiện hoàn thành ngày 14/09
@@ -469,7 +469,7 @@ Chỉ kiểm thử và sửa lỗi; không thêm chức năng mới.
 
 - Deploy backend, frontend và database migration.
 - Chạy smoke test production bằng tài khoản test.
-- Kiểm tra callback VNPay, cookie, CORS, domain và HTTPS.
+- Kiểm tra callback SePay, cookie, CORS, domain và HTTPS.
 
 ### 16:00–19:00
 
@@ -507,7 +507,7 @@ Nếu còn lỗi liên quan tiền, quyền, mất dữ liệu, asset trùng ho�
 | 09/09 | Frontend seller product | ⬜ Chưa làm | 0 | 0 | |
 | 10/09 | Seller order end-to-end | ⬜ Chưa làm | 0 | 0 | |
 | 11/09 | Dashboard/wallet seller thật | ⬜ Chưa làm | 0 | 0 | |
-| 12/09 | Buyer/auth/VNPay | ⬜ Chưa làm | 0 | 0 | |
+| 12/09 | Buyer/auth/SePay | ⬜ Chưa làm | 0 | 0 | |
 | 13/09 | Security/performance/database | ⬜ Chưa làm | 0 | 0 | |
 | 14/09 | Full test/staging/UAT | ⬜ Chưa làm | 0 | 0 | |
 | 15/09 | Release/production/sign-off | ⬜ Chưa làm | 0 | 0 | |
@@ -585,7 +585,7 @@ Kế hoạch này cần khoảng **90–110 giờ làm việc tập trung trong 
 - khóa phạm vi ngay từ 05/09;
 - ưu tiên nghiệp vụ trước tinh chỉnh giao diện;
 - không thêm module lớn mới;
-- có sẵn PostgreSQL, VNPay sandbox, domain/SSL và môi trường deploy;
+- có sẵn PostgreSQL, SePay sandbox, domain/SSL và môi trường deploy;
 - mọi ngày đều đạt điều kiện nghiệm thu trước khi chuyển sang ngày tiếp theo.
 
 Nếu chỉ làm 3–4 giờ/ngày, deadline an toàn cần dời thêm ít nhất 2–3 tuần. Việc giữ ngày 15/09 trong trường hợp đó chỉ có thể thực hiện bằng cách giảm phạm vi MVP, không được giảm test cho dòng tiền và phân quyền.
