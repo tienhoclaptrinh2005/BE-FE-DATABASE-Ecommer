@@ -343,7 +343,7 @@ Buyer đi được toàn bộ hành trình mà không gặp route giả hoặc d
 - Kiểm tra hết kho phải hiển thị “Hết hàng”.
 - Kiểm tra order code thống nhất từ modal thành công đến URL lịch sử đơn.
 - Kiểm tra ownership của order, asset và dispute.
-- Hoàn thiện SePay checkout/callback/IPN/idempotency.
+- Cấu hình SePay Test Mode cho VietQR + Bank Webhook và kiểm thử HMAC/idempotency/duplicate.
 - Lịch sử nạp tiền và biến động số dư phải khớp wallet transaction.
 - Chốt voucher:
   - nếu đủ thời gian thì triển khai end-to-end;
@@ -438,7 +438,7 @@ Chỉ kiểm thử và sửa lỗi; không thêm chức năng mới.
 - Frontend lint và production build.
 - E2E cho ba role.
 - Concurrent checkout/refund/resolve/withdrawal.
-- SePay IPN đúng, sai secret và gửi lặp.
+- SePay Bank Webhook đúng, sai HMAC, gửi lặp, sai số tiền và thanh toán quá hạn.
 - Smoke test staging.
 
 ### Điều kiện hoàn thành ngày 14/09

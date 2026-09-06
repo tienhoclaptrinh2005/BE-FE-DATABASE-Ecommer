@@ -125,7 +125,8 @@ SUPER_ADMIN > ADMIN > BUYER
 - Tải tài sản số dạng TXT cho đơn giao ngay đã mua.
 - Buyer có thể tạo, xem, chuyển admin, xác nhận bảo hành và tự rút khiếu nại theo state machine.
 - Ví buyer hiển thị số dư thật, lịch sử biến động số dư và lịch sử nạp tiền thật.
-- Trang nạp tiền SePay đã có giao diện và API tạo checkout/IPN.
+- Trang nạp tiền đã dùng VietQR + SePay Bank Webhook: QR 15 phút, polling trạng thái,
+  HMAC raw body, chống lặp và chỉ cộng ví sau khi đối chiếu đúng tài khoản/số tiền/thời gian.
 - Trang đăng ký seller `/seller-register` đã kết nối backend.
 - Trang liên hệ và trang 404 đã có giao diện; form liên hệ hiện vẫn là mock.
 
@@ -339,14 +340,15 @@ Seller:
 - `POST /api/v1/seller/orders/{id}/complete`
 - `POST /api/v1/seller/orders/{id}/cancel`
 
-### 5.8. Wallet, deposit và withdrawal — 8 API
+### 5.8. Wallet, deposit và withdrawal — 9 API
 
 - `GET /api/v1/wallet`
 - `GET /api/v1/wallet/transactions`
 - `GET /api/v1/seller/wallet/transactions`
-- `GET /api/v1/wallet/deposit`
-- `POST /api/v1/wallet/deposit`
-- `POST /api/v1/wallet/deposit/sepay-ipn`
+- `GET /api/v1/wallet/deposits`
+- `POST /api/v1/wallet/deposits`
+- `GET /api/v1/wallet/deposits/{transactionCode}`
+- `POST /api/v1/payments/sepay/webhook`
 - `POST /api/v1/wallet/withdraw`
 - `PUT /api/v1/admin/withdrawals/{id}/process`
 
@@ -475,7 +477,8 @@ Backend đã có một phần nhưng frontend còn thiếu:
 
 - Hoàn thiện forgot password, reset password và verify email. Security config đã whitelist route nhưng chưa có controller tương ứng.
 - Chốt nghiệp vụ voucher: database có bảng nhưng Java module/API chưa được triển khai. Nếu chưa làm voucher ở MVP thì phải bỏ/ẩn ô voucher trên UI.
-- Hoàn thiện kết quả SePay sandbox: success/error/cancel, đối soát IPN, idempotency và retry.
+- Kết nối URL webhook public vào SePay Test Mode và smoke test giao dịch thật; code đã có
+  HMAC, idempotency, chống duplicate, hết hạn 15 phút và trạng thái cần đối soát.
 - Lịch sử withdrawal/deposit nên có trạng thái và trang chi tiết nhất quán.
 - Chuẩn hóa modal thành công/lỗi/xác nhận cho mọi thao tác ghi dữ liệu.
 
@@ -675,7 +678,7 @@ Tiêu chí hoàn thành: seller có thể từ đăng ký shop đến đăng s�
 - [ ] Có dashboard log/metrics/alert.
 - [ ] Có health/readiness probe.
 - [ ] Có rollback release và runbook xử lý sự cố thanh toán.
-- [ ] SePay sandbox đã test checkout, callback, IPN lặp, IPN sai secret và timeout.
+- [ ] SePay Test Mode đã test webhook đúng/sai HMAC, webhook lặp, QR hết hạn và giao dịch cần đối soát.
 
 ---
 

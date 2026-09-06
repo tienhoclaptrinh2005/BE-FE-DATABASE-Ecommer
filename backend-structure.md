@@ -259,10 +259,12 @@ commercehub-backend/
     │   │   │
     │   │   ├── wallet/                               -- [DONE]
     │   │   │   ├── config/
-    │   │   │   │   └── PlatformWalletInitializer.java
+    │   │   │   │   ├── PlatformWalletInitializer.java
+    │   │   │   │   └── SePayProperties.java
     │   │   │   ├── controller/
     │   │   │   │   ├── AdminWithdrawalController.java
-    │   │   │   │   ├── DepositController.java         -- SePay checkout/IPN + amount match
+    │   │   │   │   ├── DepositController.java         -- tạo VietQR + trạng thái/lịch sử của owner
+    │   │   │   │   ├── SePayWebhookController.java    -- public HMAC webhook
     │   │   │   │   ├── WalletController.java
     │   │   │   │   └── WithdrawalController.java
     │   │   │   ├── dto/request|response/ …
@@ -275,11 +277,14 @@ commercehub-backend/
     │   │   │   ├── mapper/WalletMapper.java
     │   │   │   ├── repository/ …
     │   │   │   ├── scheduler/
+    │   │   │   │   ├── DepositExpiryScheduler.java    -- QR hết hạn sau 15 phút
     │   │   │   │   └── HoldReleaseScheduler.java      -- [DONE] @SchedulerLock
     │   │   │   └── service/
     │   │   │       ├── DepositService.java
     │   │   │       ├── HoldReleaseProcessor.java      -- T+7: net + fee collect
     │   │   │       ├── HoldReleaseService.java        -- dispute freeze/resolve
+    │   │   │       ├── SePayWebhookService.java       -- HMAC, account/amount/time, dedupe
+    │   │   │       ├── VietQrService.java              -- URL QR chính thức vietqr.app
     │   │   │       ├── WalletService.java
     │   │   │       ├── WalletTransactionService.java
     │   │   │       └── WithdrawalService.java
@@ -290,7 +295,7 @@ commercehub-backend/
     │   │   │   ├── entity/Payment.java
     │   │   │   ├── service/
     │   │   │   │   ├── PaymentService.java
-    │   │   │   │   ├── SePayGatewayService.java
+    │   │   │   │   ├── PaymentGatewayService.java
     │   │   │   │   ├── MomoService.java
     │   │   │   │   ├── ZaloPayService.java
     │   │   │   │   └── PaymentCallbackService.java
@@ -481,7 +486,7 @@ commercehub-backend/
 | cart | DONE | API `/api/v1/cart` |
 | order (+ checkout, pre-order, schedulers) | DONE | trừ ví ngay |
 | fee | DONE | không waive |
-| wallet (+ deposit IPN, hold, withdrawal) | DONE | |
+| wallet (+ VietQR/SePay webhook, hold, withdrawal) | DONE | cần smoke test webhook SePay Test Mode |
 | voucher, dispute, chat, notification | TODO | bảng đã có trong schema SQL |
 | audit, fraud, admin, file, payment | TODO | |
 | cache/redis, event/kafka, outbox, Flyway | TODO | |
@@ -501,7 +506,7 @@ commercehub-backend/
 ## Luồng tiền (khớp code)
 
 ```
-Nạp ví (SePay checkout + IPN SECRET_KEY, đối chiếu amount và transaction id)
+Nạp ví (VietQR 15 phút + SePay Bank Webhook HMAC, đối chiếu account/amount/time và transaction id)
   → Checkout (cart hoặc /checkout) trừ WALLET ngay
   → holdForSeller(total)
   → mỗi OrderItem: HoldRelease + FeeLedger (PENDING), fee snapshot 4% CEILING

@@ -144,7 +144,9 @@ CREATE TABLE IF NOT EXISTS deposits (
     provider_transaction_id VARCHAR(100),
     idempotency_key  VARCHAR(100)  UNIQUE,
     status           VARCHAR(30)   NOT NULL DEFAULT 'PENDING'
-                         CHECK (status IN ('PENDING','SUCCESS','FAILED')),
+                         CHECK (status IN ('PENDING','SUCCESS','FAILED','EXPIRED','REVIEW_REQUIRED')),
+    expires_at       TIMESTAMPTZ   NOT NULL,
+    paid_at          TIMESTAMPTZ,
     processed_at     TIMESTAMPTZ,
     created_at       TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
@@ -154,13 +156,53 @@ CREATE INDEX IF NOT EXISTS idx_deposits_user ON deposits(user_id, created_at DES
 ALTER TABLE deposits
     ADD COLUMN IF NOT EXISTS provider_transaction_id VARCHAR(100);
 ALTER TABLE deposits
+    ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+ALTER TABLE deposits
+    ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ;
+ALTER TABLE deposits
+    DROP CONSTRAINT IF EXISTS deposits_status_check;
+
+-- QR SePay chỉ có hiệu lực 15 phút. Dữ liệu cũ được suy ra từ created_at,
+-- các mã PENDING đã quá hạn được đóng lại nhưng không xóa lịch sử.
+UPDATE deposits
+SET expires_at = created_at + INTERVAL '15 minutes'
+WHERE expires_at IS NULL;
+
+UPDATE deposits
+SET status = 'EXPIRED', processed_at = COALESCE(processed_at, NOW())
+WHERE status = 'PENDING' AND expires_at <= NOW();
+
+-- Nếu dữ liệu cũ từng tạo nhiều PENDING cho cùng user, chỉ giữ mã mới nhất.
+WITH duplicate_pending AS (
+    SELECT id,
+           ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at DESC, id DESC) AS row_number
+    FROM deposits
+    WHERE status = 'PENDING'
+)
+UPDATE deposits d
+SET status = 'EXPIRED', processed_at = COALESCE(d.processed_at, NOW())
+FROM duplicate_pending p
+WHERE d.id = p.id AND p.row_number > 1;
+
+ALTER TABLE deposits
+    ALTER COLUMN expires_at SET NOT NULL;
+ALTER TABLE deposits
     DROP CONSTRAINT IF EXISTS deposits_provider_check;
 ALTER TABLE deposits
     ADD CONSTRAINT deposits_provider_check
         CHECK (provider IN ('SEPAY','VNPAY','MOMO','ZALOPAY'));
+ALTER TABLE deposits
+    ADD CONSTRAINT deposits_status_check
+        CHECK (status IN ('PENDING','SUCCESS','FAILED','EXPIRED','REVIEW_REQUIRED'));
 CREATE UNIQUE INDEX IF NOT EXISTS uq_deposits_provider_transaction
     ON deposits(provider_transaction_id)
     WHERE provider_transaction_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_deposits_one_pending_per_user
+    ON deposits(user_id)
+    WHERE status = 'PENDING';
+CREATE INDEX IF NOT EXISTS idx_deposits_pending_expiry
+    ON deposits(status, expires_at)
+    WHERE status = 'PENDING';
 
 CREATE TABLE IF NOT EXISTS withdrawals (
     id              BIGSERIAL     PRIMARY KEY,
@@ -1357,7 +1399,7 @@ COMMIT;
 -- ============================================================
 -- TỔNG KẾT LUỒNG TIỀN v8
 -- ============================================================
--- A. NẠP TIỀN: SePay IPN → đối chiếu amount → DEPOSIT vào ví buyer
+-- A. NẠP TIỀN: VietQR → SePay Bank Webhook (HMAC + chống lặp) → DEPOSIT vào ví buyer
 -- B. CHECKOUT (cart hoặc buy-now): luôn WALLET
 --      buyer.available -= total
 --      seller.hold     += total
