@@ -156,7 +156,7 @@ SELECT
     'https://api.dicebear.com/9.x/initials/svg?seed=CommerceHub%20Store',
     'https://images.unsplash.com/photo-1497366811353-6870744d04b2?auto=format&fit=crop&w=1600&q=80',
     'Gian hàng dữ liệu mẫu dùng để kiểm tra sản phẩm giao ngay và đặt trước.',
-    0, 0, 0, 'ACTIVE', 5.00, NOW() - INTERVAL '8 months', NOW()
+    0, 0, 0, 'ACTIVE', 0.00, NOW() - INTERVAL '8 months', NOW()
 FROM users u
 WHERE u.username = 'seller_demo'
 ON CONFLICT (slug) DO UPDATE SET
@@ -175,7 +175,7 @@ SELECT
     'https://api.dicebear.com/9.x/initials/svg?seed=VPN%20Store',
     'https://images.unsplash.com/photo-1558494949-ef010cbdcc31?auto=format&fit=crop&w=1600&q=80',
     'Gian hàng VPN mẫu để kiểm tra profile và thống kê mua bán chéo.',
-    0, 0, 0, 'ACTIVE', 5.00, NOW() - INTERVAL '5 months', NOW()
+    0, 0, 0, 'ACTIVE', 0.00, NOW() - INTERVAL '5 months', NOW()
 FROM users u
 WHERE u.username = 'vpn_seller'
 ON CONFLICT (slug) DO UPDATE SET
@@ -812,6 +812,37 @@ WHERE NOT EXISTS (
       SELECT 1 FROM product_reviews existing
       WHERE existing.order_item_id = oi.id
   );
+
+-- Đồng bộ cache điểm shop từ toàn bộ đánh giá đang hiển thị. Không lấy trung
+-- bình của từng sản phẩm vì cách đó làm sai trọng số số lượt đánh giá.
+WITH shop_rating_stats AS (
+    SELECT p.shop_id,
+           COUNT(r.id)::BIGINT AS rating_count,
+           COALESCE(SUM(r.rating), 0)::BIGINT AS rating_sum
+    FROM products p
+    JOIN product_reviews r
+      ON r.product_id = p.id
+     AND r.is_visible = TRUE
+    GROUP BY p.shop_id
+)
+UPDATE shops shop
+SET rating_count = COALESCE(stats.rating_count, 0),
+    rating_sum = COALESCE(stats.rating_sum, 0),
+    rating_avg = CASE
+        WHEN COALESCE(stats.rating_count, 0) = 0 THEN 0
+        ELSE ROUND(stats.rating_sum::NUMERIC / stats.rating_count, 2)
+    END,
+    updated_at = NOW()
+FROM (
+    SELECT shop_id, rating_count, rating_sum FROM shop_rating_stats
+    UNION ALL
+    SELECT shop.id, 0::BIGINT, 0::BIGINT
+    FROM shops shop
+    WHERE NOT EXISTS (
+        SELECT 1 FROM shop_rating_stats stats WHERE stats.shop_id = shop.id
+    )
+) stats
+WHERE stats.shop_id = shop.id;
 
 -- Tổng hợp phí tháng từ ledger COLLECTED (cùng công thức ShopFeeSummaryService).
 INSERT INTO shop_fee_summaries (

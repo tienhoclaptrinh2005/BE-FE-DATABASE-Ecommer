@@ -358,6 +358,8 @@ CREATE TABLE IF NOT EXISTS shops (
     status           VARCHAR(30)   NOT NULL DEFAULT 'PENDING'
                          CHECK (status IN ('PENDING','ACTIVE','REJECTED','BANNED')),
     rating_avg       NUMERIC(3,2)  NOT NULL DEFAULT 0,
+    rating_count     BIGINT        NOT NULL DEFAULT 0,
+    rating_sum       BIGINT        NOT NULL DEFAULT 0,
     version          BIGINT        NOT NULL DEFAULT 0,
     created_at       TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
     updated_at       TIMESTAMPTZ   NOT NULL DEFAULT NOW()
@@ -367,6 +369,8 @@ CREATE TABLE IF NOT EXISTS shops (
 ALTER TABLE shops ALTER COLUMN status SET DEFAULT 'PENDING';
 ALTER TABLE shops ADD COLUMN IF NOT EXISTS contact_info VARCHAR(255);
 ALTER TABLE shops ADD COLUMN IF NOT EXISTS application_reason VARCHAR(500);
+ALTER TABLE shops ADD COLUMN IF NOT EXISTS rating_count BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE shops ADD COLUMN IF NOT EXISTS rating_sum BIGINT NOT NULL DEFAULT 0;
 -- Tách thành nhiều bước để chạy an toàn cả khi Hibernate đã tạo dở cột version.
 ALTER TABLE shops ADD COLUMN IF NOT EXISTS version BIGINT;
 UPDATE shops SET version = 0 WHERE version IS NULL;
@@ -517,6 +521,9 @@ CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id, status
 CREATE INDEX IF NOT EXISTS idx_products_delivery ON products(delivery_type, status);
 CREATE INDEX IF NOT EXISTS idx_products_public_created
     ON products(created_at DESC) WHERE status = 'ACTIVE';
+CREATE INDEX IF NOT EXISTS idx_products_public_best_selling
+    ON products(sold_count DESC, created_at DESC, id DESC)
+    WHERE status = 'ACTIVE' AND sold_count > 0;
 
 CREATE TABLE IF NOT EXISTS pre_order_configs (
     id                         BIGSERIAL   PRIMARY KEY,
@@ -1014,6 +1021,37 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_product_reviews_product_user
     ON product_reviews(product_id, user_id);
 CREATE INDEX IF NOT EXISTS idx_product_reviews_public
     ON product_reviews(product_id, created_at DESC) WHERE is_visible = TRUE;
+
+-- product_reviews là nguồn dữ liệu gốc. Backfill lại cache đánh giá shop để
+-- database cũ không tiếp tục dùng rating_avg được nhập tay hoặc dữ liệu seed.
+WITH shop_rating_stats AS (
+    SELECT p.shop_id,
+           COUNT(r.id)::BIGINT AS rating_count,
+           COALESCE(SUM(r.rating), 0)::BIGINT AS rating_sum
+    FROM products p
+    JOIN product_reviews r
+      ON r.product_id = p.id
+     AND r.is_visible = TRUE
+    GROUP BY p.shop_id
+)
+UPDATE shops shop
+SET rating_count = COALESCE(stats.rating_count, 0),
+    rating_sum = COALESCE(stats.rating_sum, 0),
+    rating_avg = CASE
+        WHEN COALESCE(stats.rating_count, 0) = 0 THEN 0
+        ELSE ROUND(stats.rating_sum::NUMERIC / stats.rating_count, 2)
+    END,
+    updated_at = NOW()
+FROM (
+    SELECT shop_id, rating_count, rating_sum FROM shop_rating_stats
+    UNION ALL
+    SELECT shop.id, 0::BIGINT, 0::BIGINT
+    FROM shops shop
+    WHERE NOT EXISTS (
+        SELECT 1 FROM shop_rating_stats stats WHERE stats.shop_id = shop.id
+    )
+) stats
+WHERE stats.shop_id = shop.id;
 
 -- ============================================================
 -- MODULE 10: CHAT / NOTIFICATION / AUDIT / FRAUD / OPS
