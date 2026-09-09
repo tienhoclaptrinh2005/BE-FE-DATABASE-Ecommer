@@ -12,7 +12,10 @@
 --   [PRE] PRE_ORDER trừ ví NGAY lúc checkout (không chờ shop accept)
 --   [HOLD] 1 OrderItem = 1 HoldRelease = 1 FeeLedger
 --   [SHOP] 1 User = 1 Shop; level giới hạn số sản phẩm (allowed_product_count)
---   [IMG] 1 Product = 1 ảnh tại products.thumbnail_url; variant không có ảnh riêng
+--   [IMG] 1 Product = 1 ảnh tại products.thumbnail_url; variant không có ảnh riêng.
+--         Ảnh R2 mới lưu object key (shops/{shopId}/products/...), backend ghép
+--         MEDIA_PUBLIC_BASE_URL khi trả response để đổi domain không phải UPDATE DB.
+--         URL tuyệt đối cũ vẫn được backend đọc tương thích.
 --   [VIS] Sản phẩm công khai chỉ khi Product + Shop + chủ Shop cùng ACTIVE;
 --         ban/unban không ghi đè status riêng của từng Product
 --   [VAR] Tên variant duy nhất trong từng Product sau khi TRIM và bỏ phân biệt hoa/thường
@@ -759,6 +762,8 @@ CREATE TABLE IF NOT EXISTS orders (
 );
 CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_orders_shop ON orders(shop_id, status);
+CREATE INDEX IF NOT EXISTS idx_orders_shop_placed_at
+    ON orders(shop_id, placed_at DESC, id DESC);
 -- Keyset/cursor pagination cho lịch sử mua hàng: không COUNT, không OFFSET sâu.
 CREATE INDEX IF NOT EXISTS idx_orders_user_cursor
     ON orders(user_id, placed_at DESC, id DESC);

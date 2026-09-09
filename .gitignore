@@ -1,0 +1,30 @@
+# Environment files and local secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Logs, local database exports, and temporary backups
+*.log
+*.dump
+*.backup
+*.bak
+*.tmp
+
+# Private keys and certificate stores
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+/.secrets/
+/secrets/
+/credentials/
+
+# Editor and operating system metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
