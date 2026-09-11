@@ -27,6 +27,9 @@
 --         PRE_ORDER : shop nhập account/key/tin nhắn → pre_order_items.delivery_content
 --                     (+ delivery_content_type ACCOUNT|KEY|MESSAGE|OTHER)
 --         seller_notes = ghi chú NỘI BỘ của shop, KHÔNG dùng để giao hàng
+--   [INV] SHA-256 content_hash duy nhất toàn sàn. Với ACCOUNT, định danh là username
+--         trước dấu | (không phân biệt hoa/thường), nên đổi password vẫn không thể bán lần hai.
+--         Loại khác dùng cả dòng; bản ghi SOLD được giữ lại để chặn nhập lại.
 --
 -- Cách dùng:
 --   psql -h localhost -p 5678 -U postgres -d commercehub_db -f schema-v8.sql
@@ -615,6 +618,8 @@ CREATE TABLE IF NOT EXISTS digital_assets (
     -- asset_data: dữ liệu cũ/metadata — TEXT khớp entity DigitalAsset (Hibernate validate)
     asset_data          TEXT         NOT NULL,
     asset_identifier    VARCHAR(500),
+    -- Fingerprint SHA-256 của asset_type + định danh chuẩn hóa; không log credential.
+    content_hash        VARCHAR(64),
     status              VARCHAR(30)  NOT NULL DEFAULT 'AVAILABLE'
                             CHECK (status IN ('AVAILABLE','RESERVED','SOLD','DISPUTED','REVOKED')),
     reserved_at         TIMESTAMPTZ,
@@ -625,6 +630,86 @@ CREATE TABLE IF NOT EXISTS digital_assets (
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+
+-- Upgrade DB cũ trước khi tạo unique index. ACCOUNT dùng username trước dấu |
+-- làm định danh; vì vậy đổi password không biến cùng account thành hàng mới.
+ALTER TABLE digital_assets ADD COLUMN IF NOT EXISTS content_hash VARCHAR(64);
+ALTER TABLE digital_assets ALTER COLUMN content_hash TYPE VARCHAR(64) USING BTRIM(content_hash);
+
+UPDATE digital_assets
+SET asset_identifier = LEFT(
+        LOWER(BTRIM(SPLIT_PART(BTRIM(COALESCE(NULLIF(delivery_content, ''), asset_data)), '|', 1))),
+        500
+    )
+WHERE asset_type = 'ACCOUNT'
+  AND BTRIM(COALESCE(NULLIF(delivery_content, ''), asset_data)) <> '';
+
+-- Nếu lịch sử trùng định danh, ưu tiên row SOLD; các row AVAILABLE dư được
+-- chuyển REVOKED để không còn khả năng giao tiếp cho buyer.
+DROP INDEX IF EXISTS uq_digital_assets_content_hash;
+UPDATE digital_assets SET content_hash = NULL;
+
+WITH normalized_assets AS (
+    SELECT id,
+           status,
+           ENCODE(DIGEST(
+               asset_type || E'\n' || CASE
+                   WHEN asset_type = 'ACCOUNT' THEN
+                       LOWER(BTRIM(SPLIT_PART(BTRIM(COALESCE(NULLIF(delivery_content, ''), asset_data)), '|', 1)))
+                   ELSE BTRIM(COALESCE(NULLIF(delivery_content, ''), asset_data))
+               END,
+               'sha256'
+           ), 'hex') AS fingerprint
+    FROM digital_assets
+    WHERE BTRIM(COALESCE(NULLIF(delivery_content, ''), asset_data)) <> ''
+), ranked_assets AS (
+    SELECT id,
+           fingerprint,
+           ROW_NUMBER() OVER (
+               PARTITION BY fingerprint
+               ORDER BY CASE status
+                            WHEN 'SOLD' THEN 0
+                            WHEN 'RESERVED' THEN 1
+                            WHEN 'DISPUTED' THEN 2
+                            WHEN 'AVAILABLE' THEN 3
+                            ELSE 4
+                        END,
+                        CASE WHEN status = 'AVAILABLE' THEN id END DESC,
+                        id
+           ) AS fingerprint_order
+    FROM normalized_assets
+)
+UPDATE digital_assets asset
+SET content_hash = CASE WHEN ranked.fingerprint_order = 1 THEN ranked.fingerprint ELSE NULL END,
+    status = CASE
+        WHEN ranked.fingerprint_order > 1 AND asset.status = 'AVAILABLE' THEN 'REVOKED'
+        ELSE asset.status
+    END,
+    updated_at = CASE
+        WHEN ranked.fingerprint_order > 1 AND asset.status = 'AVAILABLE' THEN NOW()
+        ELSE asset.updated_at
+    END
+FROM ranked_assets ranked
+WHERE asset.id = ranked.id;
+
+-- stock_count là cache; tái đồng bộ theo số row AVAILABLE thực tế sau cleanup.
+WITH actual_stock AS (
+    SELECT variant.id AS variant_id,
+           COUNT(asset.id) FILTER (WHERE asset.status = 'AVAILABLE')::INT AS available_count
+    FROM product_variants variant
+    JOIN products product ON product.id = variant.product_id
+    LEFT JOIN digital_assets asset ON asset.product_variant_id = variant.id
+    WHERE product.delivery_type = 'INSTANT'
+    GROUP BY variant.id
+)
+UPDATE product_variants variant
+SET stock_count = actual.available_count
+FROM actual_stock actual
+WHERE variant.id = actual.variant_id
+  AND variant.stock_count IS DISTINCT FROM actual.available_count;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_digital_assets_content_hash
+    ON digital_assets(content_hash);
 CREATE INDEX IF NOT EXISTS idx_digital_assets_available
     ON digital_assets(product_variant_id, status) WHERE status = 'AVAILABLE';
 CREATE INDEX IF NOT EXISTS idx_digital_assets_order_item
@@ -1207,6 +1292,7 @@ CREATE TABLE IF NOT EXISTS shedlock (
 -- ============================================================
 -- Idempotent: DB mới thì các cột đã có sẵn trong CREATE TABLE, ALTER bên dưới bị bỏ qua.
 ALTER TABLE digital_assets      ADD COLUMN IF NOT EXISTS delivery_content TEXT;
+ALTER TABLE digital_assets      ADD COLUMN IF NOT EXISTS content_hash VARCHAR(64);
 -- DB cũ tạo cột dạng JSONB → đổi sang TEXT khớp entity (Hibernate validate)
 ALTER TABLE digital_assets      ALTER COLUMN asset_data   TYPE TEXT USING asset_data::text;
 ALTER TABLE pre_order_items     ALTER COLUMN buyer_inputs TYPE TEXT USING buyer_inputs::text;
