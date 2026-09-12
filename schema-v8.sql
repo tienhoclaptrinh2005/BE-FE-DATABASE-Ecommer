@@ -1195,6 +1195,17 @@ CREATE TABLE IF NOT EXISTS notifications (
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, is_read, created_at DESC)
     WHERE archived_at IS NULL;
 
+-- Mốc đã xem badge trong Seller Center. Lưu ở database để đồng bộ giữa các
+-- trình duyệt/thiết bị và để badge không xuất hiện vĩnh viễn sau khi đã xem.
+CREATE TABLE IF NOT EXISTS seller_notification_reads (
+    seller_id               BIGINT      PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    instant_orders_read_at  TIMESTAMPTZ NOT NULL DEFAULT TIMESTAMPTZ 'epoch',
+    pre_orders_read_at      TIMESTAMPTZ NOT NULL DEFAULT TIMESTAMPTZ 'epoch',
+    disputes_read_at        TIMESTAMPTZ NOT NULL DEFAULT TIMESTAMPTZ 'epoch',
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS audit_logs (
     id          BIGSERIAL    PRIMARY KEY,
     actor_id    BIGINT       NOT NULL REFERENCES users(id),
