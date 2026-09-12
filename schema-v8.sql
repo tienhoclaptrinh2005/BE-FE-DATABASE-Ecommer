@@ -9,6 +9,12 @@
 --   [DEL] Waive phí sàn — KHÔNG có status WAIVED / total_waived / waived_at
 --   [FEE] Mặc định 4% (0.0400), làm tròn CEILING đồng nguyên
 --   [PAY] Mua hàng luôn trừ WALLET (nạp trước — mua sau)
+--         payment_status chỉ gồm PAID | PARTIALLY_REFUNDED | REFUNDED.
+--   [ORD] orders.status chỉ mô tả vòng đời giao hàng:
+--         WAITING_SELLER_ACCEPTANCE | PROCESSING | DELIVERED | REJECTED | CANCELLED.
+--         Khi hủy, nguyên nhân nằm ở cancelled_by/cancellation_code/reason/at.
+--   [DSP] Khiếu nại tách status (tiến trình) khỏi resolution (phán quyết),
+--         không ghi BUYER_WIN/SELLER_WIN vào orders.status.
 --   [PRE] PRE_ORDER trừ ví NGAY lúc checkout (không chờ shop accept)
 --   [HOLD] 1 OrderItem = 1 HoldRelease = 1 FeeLedger
 --   [SHOP] 1 User = 1 Shop; level giới hạn số sản phẩm (allowed_product_count)
@@ -826,9 +832,13 @@ CREATE TABLE IF NOT EXISTS orders (
     voucher_discount       NUMERIC(18,2) NOT NULL DEFAULT 0,
     delivery_type          VARCHAR(20)   NOT NULL DEFAULT 'INSTANT'
                                CHECK (delivery_type IN ('INSTANT','PRE_ORDER')),
-    status                 VARCHAR(30)   NOT NULL DEFAULT 'PENDING',
-    payment_status         VARCHAR(30)   NOT NULL DEFAULT 'UNPAID'
-                               CHECK (payment_status IN ('UNPAID','PAID','REFUNDED','PARTIAL_REFUND')),
+    status                 VARCHAR(30)   NOT NULL
+                               CHECK (status IN (
+                                   'WAITING_SELLER_ACCEPTANCE','PROCESSING','DELIVERED',
+                                   'REJECTED','CANCELLED'
+                               )),
+    payment_status         VARCHAR(30)   NOT NULL
+                               CHECK (payment_status IN ('PAID','PARTIALLY_REFUNDED','REFUNDED')),
     -- v8: mua hàng CHỈ WALLET (SEPAY/VNPAY lịch sử/MOMO/ZALOPAY chỉ dùng để NẠP ví)
     payment_method         VARCHAR(30)   NOT NULL DEFAULT 'WALLET'
                                CHECK (payment_method = 'WALLET'),
@@ -841,11 +851,41 @@ CREATE TABLE IF NOT EXISTS orders (
     approval_deadline_at   TIMESTAMPTZ,
     processing_deadline_at TIMESTAMPTZ,
     rejection_reason       TEXT,
+    cancelled_by           VARCHAR(20)
+                               CHECK (cancelled_by IS NULL OR cancelled_by IN ('BUYER','SELLER','SYSTEM','ADMIN')),
+    cancellation_code      VARCHAR(40)
+                               CHECK (cancellation_code IS NULL OR cancellation_code IN (
+                                   'BUYER_REQUEST','SELLER_CANCELLED','SELLER_ACCEPTANCE_TIMEOUT',
+                                   'SELLER_PROCESSING_TIMEOUT','ADMIN_CANCELLED'
+                               )),
+    cancellation_reason    TEXT,
+    cancelled_at           TIMESTAMPTZ,
     idempotency_key        VARCHAR(100),
     checkout_request_id    BIGINT,
     version                BIGINT        NOT NULL DEFAULT 0,
     created_at             TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
-    updated_at             TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+    updated_at             TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_orders_cancellation_metadata CHECK (
+        (status = 'CANCELLED'
+            AND cancelled_by IS NOT NULL
+            AND cancellation_code IS NOT NULL
+            AND cancelled_at IS NOT NULL)
+        OR
+        (status <> 'CANCELLED'
+            AND cancelled_by IS NULL
+            AND cancellation_code IS NULL
+            AND cancellation_reason IS NULL
+            AND cancelled_at IS NULL)
+    ),
+    CONSTRAINT chk_orders_cancellation_actor_code CHECK (
+        status <> 'CANCELLED'
+        OR (cancelled_by = 'BUYER' AND cancellation_code = 'BUYER_REQUEST')
+        OR (cancelled_by = 'SELLER' AND cancellation_code = 'SELLER_CANCELLED')
+        OR (cancelled_by = 'SYSTEM' AND cancellation_code IN (
+            'SELLER_ACCEPTANCE_TIMEOUT','SELLER_PROCESSING_TIMEOUT'
+        ))
+        OR (cancelled_by = 'ADMIN' AND cancellation_code = 'ADMIN_CANCELLED')
+    )
 );
 CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_orders_shop ON orders(shop_id, status);
@@ -860,7 +900,7 @@ DROP INDEX IF EXISTS uq_orders_user_idem_key;
 CREATE INDEX IF NOT EXISTS idx_orders_processing_deadline
     ON orders(processing_deadline_at, id) WHERE status = 'PROCESSING';
 CREATE INDEX IF NOT EXISTS idx_orders_approval_deadline
-    ON orders(approval_deadline_at, id) WHERE status = 'WAITING_APPROVAL';
+    ON orders(approval_deadline_at, id) WHERE status = 'WAITING_SELLER_ACCEPTANCE';
 
 CREATE TABLE IF NOT EXISTS order_items (
     id                 BIGSERIAL     PRIMARY KEY,
@@ -894,8 +934,6 @@ CREATE TABLE IF NOT EXISTS pre_order_items (
     order_item_id         BIGINT       NOT NULL UNIQUE REFERENCES order_items(id) ON DELETE CASCADE,
     buyer_inputs          TEXT,        -- JSON string — TEXT khớp entity PreOrderItem (Hibernate validate)
     buyer_note            TEXT,
-    status                VARCHAR(30)  NOT NULL DEFAULT 'PENDING'
-                              CHECK (status IN ('PENDING','ACCEPTED','PROCESSING','DELIVERED','REJECTED','CANCELLED')),
     delivery_content      TEXT,
     delivery_content_type VARCHAR(20),
     seller_notes          TEXT,
@@ -961,10 +999,7 @@ CREATE TABLE IF NOT EXISTS hold_releases (
     seller_net_amount      NUMERIC(18,2) NOT NULL CHECK (seller_net_amount >= 0),
     fee_ledger_id          BIGINT,
     status                 VARCHAR(30)   NOT NULL DEFAULT 'HOLDING'
-                               CHECK (status IN (
-                                   'HOLDING','COMPLAINED','WARRANTY_IN_PROGRESS',
-                                   'WAITING_BUYER_CONFIRMATION','DISPUTED','RELEASED','REFUNDED'
-                               )),
+                               CHECK (status IN ('HOLDING','FROZEN','RELEASED','REFUNDED')),
     scheduled_release_at   TIMESTAMPTZ   NOT NULL,
     released_at            TIMESTAMPTZ,
     complaint_reason       TEXT,
@@ -1059,23 +1094,35 @@ CREATE TABLE IF NOT EXISTS order_disputes (
     status             VARCHAR(30)   NOT NULL DEFAULT 'OPEN'
                            CHECK (status IN (
                                'OPEN','WARRANTY_IN_PROGRESS','WAITING_BUYER_CONFIRMATION',
-                               'PROCESSING','BUYER_WIN','SELLER_WIN','CLOSED'
+                               'ADMIN_REVIEW','RESOLVED'
                            )),
+    resolution         VARCHAR(40)
+                           CHECK (resolution IS NULL OR resolution IN (
+                               'BUYER_WIN','SELLER_WIN','BUYER_WITHDREW',
+                               'WARRANTY_ACCEPTED','BUYER_CONFIRMATION_TIMEOUT'
+                           )),
+    resolved_by        VARCHAR(20)
+                           CHECK (resolved_by IS NULL OR resolved_by IN ('BUYER','ADMIN','SYSTEM')),
     refund_amount      NUMERIC(18,2),
-    admin_note         TEXT,
+    resolution_note    TEXT,
     resolver_id        BIGINT        REFERENCES users(id),
-    closed_reason      VARCHAR(40),
     created_at         TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
     deadline_at        TIMESTAMPTZ   NOT NULL,
     resolved_at        TIMESTAMPTZ,
     updated_at         TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
-    CONSTRAINT order_disputes_closed_reason_check CHECK (
-        (status = 'CLOSED'
-            AND closed_reason IS NOT NULL
-            AND closed_reason IN (
-                'BUYER_WITHDREW','BUYER_ACCEPTED_WARRANTY','BUYER_CONFIRMATION_TIMEOUT'
-            ))
-        OR (status <> 'CLOSED' AND closed_reason IS NULL)
+    CONSTRAINT chk_order_disputes_resolution CHECK (
+        (status = 'RESOLVED'
+            AND resolution IS NOT NULL
+            AND resolved_by IS NOT NULL
+            AND resolved_at IS NOT NULL
+            AND ((resolved_by = 'ADMIN' AND resolver_id IS NOT NULL)
+                OR (resolved_by IN ('BUYER','SYSTEM') AND resolver_id IS NULL)))
+        OR
+        (status <> 'RESOLVED'
+            AND resolution IS NULL
+            AND resolved_by IS NULL
+            AND resolver_id IS NULL
+            AND resolved_at IS NULL)
     )
 );
 CREATE INDEX IF NOT EXISTS idx_disputes_status_deadline
@@ -1315,6 +1362,138 @@ ALTER TABLE pre_order_items     ADD COLUMN IF NOT EXISTS delivery_content_type V
 ALTER TABLE pre_order_items     ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
 ALTER TABLE pre_order_items     ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
 
+-- Chuẩn hóa vòng đời đơn, trạng thái thanh toán và metadata hủy đơn.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_by VARCHAR(20);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancellation_code VARCHAR(40);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;
+
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_status_check;
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_payment_status_check;
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS chk_orders_cancellation_metadata;
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS chk_orders_cancellation_actor_code;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM orders WHERE payment_status = 'UNPAID') THEN
+        RAISE EXCEPTION 'Không thể tự động đổi order UNPAID: cần đối soát thanh toán trước khi chạy schema-v8.sql';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM orders
+        WHERE status = 'PENDING' AND delivery_type <> 'PRE_ORDER'
+    ) THEN
+        RAISE EXCEPTION 'Không thể tự động đổi order INSTANT/PENDING: cần đối soát giao hàng trước khi chạy schema-v8.sql';
+    END IF;
+END $$;
+
+UPDATE orders
+SET cancelled_by = CASE status
+        WHEN 'CANCELLED' THEN 'BUYER'
+        WHEN 'CANCELLED_BY_BUYER' THEN 'BUYER'
+        WHEN 'CANCELLED_BY_SELLER' THEN 'SELLER'
+        WHEN 'CANCELLED_BY_SYSTEM' THEN 'SYSTEM'
+        ELSE cancelled_by
+    END,
+    cancellation_code = CASE status
+        WHEN 'CANCELLED' THEN 'BUYER_REQUEST'
+        WHEN 'CANCELLED_BY_BUYER' THEN 'BUYER_REQUEST'
+        WHEN 'CANCELLED_BY_SELLER' THEN 'SELLER_CANCELLED'
+        WHEN 'CANCELLED_BY_SYSTEM' THEN CASE
+            WHEN approved_at IS NULL THEN 'SELLER_ACCEPTANCE_TIMEOUT'
+            ELSE 'SELLER_PROCESSING_TIMEOUT'
+        END
+        ELSE cancellation_code
+    END,
+    cancellation_reason = COALESCE(
+        cancellation_reason,
+        rejection_reason,
+        CASE status
+            WHEN 'CANCELLED_BY_SYSTEM' THEN 'Hệ thống tự hủy đơn đặt hàng quá hạn 24 giờ'
+            WHEN 'CANCELLED_BY_SELLER' THEN 'Người bán hủy đơn'
+            ELSE 'Người mua hủy đơn'
+        END
+    ),
+    cancelled_at = COALESCE(cancelled_at, rejected_at, updated_at, NOW())
+WHERE status IN ('CANCELLED','CANCELLED_BY_BUYER','CANCELLED_BY_SELLER','CANCELLED_BY_SYSTEM');
+
+UPDATE orders
+SET status = CASE status
+        WHEN 'PENDING' THEN 'WAITING_SELLER_ACCEPTANCE'
+        WHEN 'WAITING_APPROVAL' THEN 'WAITING_SELLER_ACCEPTANCE'
+        WHEN 'APPROVED' THEN 'PROCESSING'
+        WHEN 'REFUNDED' THEN 'DELIVERED'
+        WHEN 'CANCELLED_BY_BUYER' THEN 'CANCELLED'
+        WHEN 'CANCELLED_BY_SELLER' THEN 'CANCELLED'
+        WHEN 'CANCELLED_BY_SYSTEM' THEN 'CANCELLED'
+        ELSE status
+    END,
+    payment_status = CASE payment_status
+        WHEN 'PARTIAL_REFUND' THEN 'PARTIALLY_REFUNDED'
+        ELSE payment_status
+    END;
+
+UPDATE orders
+SET cancelled_by = NULL,
+    cancellation_code = NULL,
+    cancellation_reason = NULL,
+    cancelled_at = NULL
+WHERE status <> 'CANCELLED';
+
+UPDATE order_status_logs
+SET from_status = CASE from_status
+        WHEN 'PENDING' THEN 'WAITING_SELLER_ACCEPTANCE'
+        WHEN 'WAITING_APPROVAL' THEN 'WAITING_SELLER_ACCEPTANCE'
+        WHEN 'APPROVED' THEN 'PROCESSING'
+        WHEN 'REFUNDED' THEN 'DELIVERED'
+        WHEN 'CANCELLED_BY_BUYER' THEN 'CANCELLED'
+        WHEN 'CANCELLED_BY_SELLER' THEN 'CANCELLED'
+        WHEN 'CANCELLED_BY_SYSTEM' THEN 'CANCELLED'
+        ELSE from_status
+    END,
+    to_status = CASE to_status
+        WHEN 'PENDING' THEN 'WAITING_SELLER_ACCEPTANCE'
+        WHEN 'WAITING_APPROVAL' THEN 'WAITING_SELLER_ACCEPTANCE'
+        WHEN 'APPROVED' THEN 'PROCESSING'
+        WHEN 'REFUNDED' THEN 'DELIVERED'
+        WHEN 'CANCELLED_BY_BUYER' THEN 'CANCELLED'
+        WHEN 'CANCELLED_BY_SELLER' THEN 'CANCELLED'
+        WHEN 'CANCELLED_BY_SYSTEM' THEN 'CANCELLED'
+        ELSE to_status
+    END;
+
+ALTER TABLE orders ALTER COLUMN status DROP DEFAULT;
+ALTER TABLE orders ALTER COLUMN payment_status DROP DEFAULT;
+ALTER TABLE orders ADD CONSTRAINT orders_status_check CHECK (status IN (
+    'WAITING_SELLER_ACCEPTANCE','PROCESSING','DELIVERED','REJECTED','CANCELLED'
+));
+ALTER TABLE orders ADD CONSTRAINT orders_payment_status_check CHECK (
+    payment_status IN ('PAID','PARTIALLY_REFUNDED','REFUNDED')
+);
+ALTER TABLE orders ADD CONSTRAINT chk_orders_cancellation_metadata CHECK (
+    (status = 'CANCELLED'
+        AND cancelled_by IS NOT NULL
+        AND cancellation_code IS NOT NULL
+        AND cancelled_at IS NOT NULL)
+    OR
+    (status <> 'CANCELLED'
+        AND cancelled_by IS NULL
+        AND cancellation_code IS NULL
+        AND cancellation_reason IS NULL
+        AND cancelled_at IS NULL)
+);
+ALTER TABLE orders ADD CONSTRAINT chk_orders_cancellation_actor_code CHECK (
+    status <> 'CANCELLED'
+    OR (cancelled_by = 'BUYER' AND cancellation_code = 'BUYER_REQUEST')
+    OR (cancelled_by = 'SELLER' AND cancellation_code = 'SELLER_CANCELLED')
+    OR (cancelled_by = 'SYSTEM' AND cancellation_code IN (
+        'SELLER_ACCEPTANCE_TIMEOUT','SELLER_PROCESSING_TIMEOUT'
+    ))
+    OR (cancelled_by = 'ADMIN' AND cancellation_code = 'ADMIN_CANCELLED')
+);
+
+-- Trạng thái của pre-order chỉ còn một nguồn sự thật: orders.status.
+ALTER TABLE pre_order_items DROP COLUMN IF EXISTS status;
+
 ALTER TABLE pre_order_items DROP CONSTRAINT IF EXISTS chk_pre_order_delivery_content_type;
 ALTER TABLE pre_order_items ADD CONSTRAINT chk_pre_order_delivery_content_type
     CHECK (delivery_content_type IS NULL
@@ -1324,7 +1503,26 @@ ALTER TABLE pre_order_items ADD CONSTRAINT chk_pre_order_delivery_content_type
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS checkout_request_id BIGINT;
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS refund_status VARCHAR(20) NOT NULL DEFAULT 'NONE';
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMPTZ;
+ALTER TABLE order_disputes ADD COLUMN IF NOT EXISTS resolution VARCHAR(40);
+ALTER TABLE order_disputes ADD COLUMN IF NOT EXISTS resolved_by VARCHAR(20);
 ALTER TABLE order_disputes ADD COLUMN IF NOT EXISTS closed_reason VARCHAR(40);
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'order_disputes'
+          AND column_name = 'admin_note'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'order_disputes'
+          AND column_name = 'resolution_note'
+    ) THEN
+        ALTER TABLE order_disputes RENAME COLUMN admin_note TO resolution_note;
+    END IF;
+END $$;
+ALTER TABLE order_disputes ADD COLUMN IF NOT EXISTS resolution_note TEXT;
 ALTER TABLE idempotency_keys ADD COLUMN IF NOT EXISTS request_hash VARCHAR(64);
 UPDATE idempotency_keys SET request_hash = REPEAT('0', 64) WHERE request_hash IS NULL;
 ALTER TABLE idempotency_keys ALTER COLUMN request_hash SET NOT NULL;
@@ -1346,49 +1544,98 @@ ALTER TABLE order_items ADD CONSTRAINT order_items_refund_status_check
     CHECK (refund_status IN ('NONE','REFUNDED'));
 
 ALTER TABLE hold_releases DROP CONSTRAINT IF EXISTS hold_releases_status_check;
+UPDATE hold_releases
+SET status = 'FROZEN'
+WHERE status IN ('COMPLAINED','WARRANTY_IN_PROGRESS','WAITING_BUYER_CONFIRMATION','DISPUTED');
 ALTER TABLE hold_releases ADD CONSTRAINT hold_releases_status_check
-    CHECK (status IN (
-        'HOLDING','COMPLAINED','WARRANTY_IN_PROGRESS','WAITING_BUYER_CONFIRMATION',
-        'DISPUTED','RELEASED','REFUNDED'
-    ));
+    CHECK (status IN ('HOLDING','FROZEN','RELEASED','REFUNDED'));
 
 ALTER TABLE order_disputes DROP CONSTRAINT IF EXISTS order_disputes_status_check;
+ALTER TABLE order_disputes DROP CONSTRAINT IF EXISTS order_disputes_closed_reason_check;
+ALTER TABLE order_disputes DROP CONSTRAINT IF EXISTS chk_order_disputes_resolution;
+
+UPDATE order_disputes
+SET resolution = CASE
+        WHEN status = 'BUYER_WIN' THEN 'BUYER_WIN'
+        WHEN status = 'SELLER_WIN' THEN 'SELLER_WIN'
+        WHEN status = 'CLOSED' AND closed_reason = 'BUYER_WITHDREW' THEN 'BUYER_WITHDREW'
+        WHEN status = 'CLOSED' AND closed_reason = 'BUYER_CONFIRMATION_TIMEOUT' THEN 'BUYER_CONFIRMATION_TIMEOUT'
+        WHEN status = 'CLOSED' THEN 'WARRANTY_ACCEPTED'
+        ELSE resolution
+    END,
+    resolved_by = CASE
+        WHEN status IN ('BUYER_WIN','SELLER_WIN') AND resolver_id IS NOT NULL THEN 'ADMIN'
+        WHEN status IN ('BUYER_WIN','SELLER_WIN') THEN 'SYSTEM'
+        WHEN status = 'CLOSED' AND closed_reason = 'BUYER_CONFIRMATION_TIMEOUT' THEN 'SYSTEM'
+        WHEN status = 'CLOSED' THEN 'BUYER'
+        ELSE resolved_by
+    END,
+    resolved_at = CASE
+        WHEN status IN ('BUYER_WIN','SELLER_WIN','CLOSED')
+            THEN COALESCE(resolved_at, updated_at, NOW())
+        ELSE resolved_at
+    END,
+    resolver_id = CASE
+        WHEN status IN ('BUYER_WIN','SELLER_WIN') AND resolver_id IS NOT NULL THEN resolver_id
+        WHEN status = 'CLOSED' THEN NULL
+        ELSE resolver_id
+    END;
+
+UPDATE order_disputes
+SET status = CASE status
+        WHEN 'PROCESSING' THEN 'ADMIN_REVIEW'
+        WHEN 'BUYER_WIN' THEN 'RESOLVED'
+        WHEN 'SELLER_WIN' THEN 'RESOLVED'
+        WHEN 'CLOSED' THEN 'RESOLVED'
+        ELSE status
+    END;
+
+-- Metadata phán quyết chỉ được giữ trên tranh chấp đã kết thúc.
+UPDATE order_disputes
+SET resolution = NULL,
+    resolved_by = NULL,
+    resolver_id = NULL,
+    resolved_at = NULL
+WHERE status <> 'RESOLVED';
+
 ALTER TABLE order_disputes ADD CONSTRAINT order_disputes_status_check
     CHECK (status IN (
         'OPEN','WARRANTY_IN_PROGRESS','WAITING_BUYER_CONFIRMATION',
-        'PROCESSING','BUYER_WIN','SELLER_WIN','CLOSED'
+        'ADMIN_REVIEW','RESOLVED'
     ));
-
--- Các bản CLOSED cũ chưa lưu lý do: nhận diện timeout qua system note, còn lại là buyer chấp nhận.
-UPDATE order_disputes
-SET closed_reason = CASE
-    WHEN admin_note = 'Hệ thống đóng do buyer không phản hồi đúng hạn'
-        THEN 'BUYER_CONFIRMATION_TIMEOUT'
-    ELSE 'BUYER_ACCEPTED_WARRANTY'
-END
-WHERE status = 'CLOSED'
-  AND closed_reason IS NULL;
-UPDATE order_disputes
-SET closed_reason = NULL
-WHERE status <> 'CLOSED'
-  AND closed_reason IS NOT NULL;
-
-ALTER TABLE order_disputes DROP CONSTRAINT IF EXISTS order_disputes_closed_reason_check;
-ALTER TABLE order_disputes ADD CONSTRAINT order_disputes_closed_reason_check
+ALTER TABLE order_disputes DROP CONSTRAINT IF EXISTS order_disputes_resolution_check;
+ALTER TABLE order_disputes DROP CONSTRAINT IF EXISTS order_disputes_resolved_by_check;
+ALTER TABLE order_disputes ADD CONSTRAINT order_disputes_resolution_check CHECK (
+    resolution IS NULL OR resolution IN (
+        'BUYER_WIN','SELLER_WIN','BUYER_WITHDREW',
+        'WARRANTY_ACCEPTED','BUYER_CONFIRMATION_TIMEOUT'
+    )
+);
+ALTER TABLE order_disputes ADD CONSTRAINT order_disputes_resolved_by_check CHECK (
+    resolved_by IS NULL OR resolved_by IN ('BUYER','ADMIN','SYSTEM')
+);
+ALTER TABLE order_disputes ADD CONSTRAINT chk_order_disputes_resolution
     CHECK (
-        (status = 'CLOSED'
-            AND closed_reason IS NOT NULL
-            AND closed_reason IN (
-                'BUYER_WITHDREW','BUYER_ACCEPTED_WARRANTY','BUYER_CONFIRMATION_TIMEOUT'
-            ))
-        OR (status <> 'CLOSED' AND closed_reason IS NULL)
+        (status = 'RESOLVED'
+            AND resolution IS NOT NULL
+            AND resolved_by IS NOT NULL
+            AND resolved_at IS NOT NULL
+            AND ((resolved_by = 'ADMIN' AND resolver_id IS NOT NULL)
+                OR (resolved_by IN ('BUYER','SYSTEM') AND resolver_id IS NULL)))
+        OR
+        (status <> 'RESOLVED'
+            AND resolution IS NULL
+            AND resolved_by IS NULL
+            AND resolver_id IS NULL
+            AND resolved_at IS NULL)
     );
+ALTER TABLE order_disputes DROP COLUMN IF EXISTS closed_reason;
 
 DROP INDEX IF EXISTS uq_orders_user_idem_key;
 CREATE INDEX IF NOT EXISTS idx_orders_processing_deadline
     ON orders(processing_deadline_at, id) WHERE status = 'PROCESSING';
 CREATE INDEX IF NOT EXISTS idx_orders_approval_deadline
-    ON orders(approval_deadline_at, id) WHERE status = 'WAITING_APPROVAL';
+    ON orders(approval_deadline_at, id) WHERE status = 'WAITING_SELLER_ACCEPTANCE';
 CREATE INDEX IF NOT EXISTS idx_order_items_refund ON order_items(order_id, refund_status);
 CREATE INDEX IF NOT EXISTS idx_disputes_status_deadline
     ON order_disputes(status, deadline_at, id);
