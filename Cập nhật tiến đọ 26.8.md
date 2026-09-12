@@ -184,8 +184,8 @@
 | Component | Chức năng | Trạng thái |
 |-----------|-----------|------------|
 | `HoldReleaseScheduler` | Chạy mỗi 5 phút - nhả tiền Hold sau 7 ngày cho Seller | ✅ Hoạt động |
-| `OrderCronJobService` (ShedLock) | Chạy mỗi 30 phút - Auto-cancel đơn `PROCESSING` quá 24h | ✅ Hoạt động |
-| `OrderCronJobService` (ShedLock) | Chạy mỗi 30 phút - Auto-cancel đơn `WAITING_APPROVAL` quá 48h | ✅ Hoạt động |
+| `OrderCronJobService` (ShedLock) | Chạy mỗi 1 phút - Auto-cancel đơn `PROCESSING` quá 24h | ✅ Hoạt động |
+| `OrderCronJobService` (ShedLock) | Chạy mỗi 1 phút - Auto-cancel đơn `WAITING_APPROVAL` quá 24h | ✅ Hoạt động |
 | `PreOrderApprovalService` | Accept, Reject, Complete, Cancel với hoàn tiền đầy đủ | ✅ Hoạt động |
 | `DisputeDeadlineScheduler` | Auto xử lý dispute quá hạn chưa được Admin giải quyết | ✅ **MỚI** |
 

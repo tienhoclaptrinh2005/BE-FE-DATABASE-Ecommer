@@ -504,7 +504,7 @@ WHERE hold.fee_ledger_id = ledger.id
 -- Hoàn thiện vòng đời riêng của đơn PRE_ORDER.
 UPDATE orders
 SET approved_at = COALESCE(approved_at, placed_at + INTERVAL '1 hour'),
-    approval_deadline_at = COALESCE(approval_deadline_at, placed_at + INTERVAL '48 hours'),
+    approval_deadline_at = COALESCE(approval_deadline_at, placed_at + INTERVAL '24 hours'),
     processing_deadline_at = COALESCE(processing_deadline_at, placed_at + INTERVAL '25 hours'),
     updated_at = delivered_at
 WHERE order_code = 'SEED-ORDER-004';

@@ -534,7 +534,9 @@ CREATE INDEX IF NOT EXISTS idx_products_public_best_selling
 CREATE TABLE IF NOT EXISTS pre_order_configs (
     id                         BIGSERIAL   PRIMARY KEY,
     product_id                 BIGINT      NOT NULL UNIQUE REFERENCES products(id) ON DELETE CASCADE,
-    max_processing_hours       INT         NOT NULL DEFAULT 24,
+    max_processing_hours       INT         NOT NULL DEFAULT 24
+                                           CONSTRAINT chk_pre_order_processing_hours_24
+                                           CHECK (max_processing_hours = 24),
     order_instructions         TEXT,
     buyer_input_fields         JSONB,
     auto_reject_if_unavailable BOOLEAN     NOT NULL DEFAULT FALSE,
