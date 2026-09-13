@@ -488,7 +488,7 @@ CREATE TABLE IF NOT EXISTS products (
     delivery_type        VARCHAR(20)   NOT NULL DEFAULT 'INSTANT'
                              CHECK (delivery_type IN ('INSTANT','PRE_ORDER')),
     status               VARCHAR(30)   NOT NULL DEFAULT 'ACTIVE'
-                             CHECK (status IN ('ACTIVE','INACTIVE','DELETED')),
+                             CHECK (status IN ('ACTIVE','INACTIVE','BANNED','DELETED')),
     sold_count           BIGINT        NOT NULL DEFAULT 0,
     failed_dispute_count BIGINT        NOT NULL DEFAULT 0,
     created_at           TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
@@ -497,6 +497,13 @@ CREATE TABLE IF NOT EXISTS products (
 
 -- Migration cho database cũ: ảnh duy nhất nằm trực tiếp trên products.
 ALTER TABLE products ADD COLUMN IF NOT EXISTS thumbnail_url VARCHAR(500);
+
+-- BANNED là trạng thái kiểm duyệt của admin; seller chỉ tự đổi ACTIVE/INACTIVE.
+ALTER TABLE products DROP CONSTRAINT IF EXISTS products_status_check;
+ALTER TABLE products ADD CONSTRAINT products_status_check
+    CHECK (status IN ('ACTIVE','INACTIVE','BANNED','DELETED'));
+CREATE INDEX IF NOT EXISTS idx_products_admin_status_created
+    ON products(status, created_at DESC);
 
 -- Product.stock_count không còn là nguồn dữ liệu; tổng tồn kho được tính từ
 -- SUM(product_variants.stock_count) của các variant ACTIVE.

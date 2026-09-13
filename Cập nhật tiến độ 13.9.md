@@ -15,30 +15,29 @@ Baseline mới nhất ngày 13/09/2026:
 
 | Hạng mục | Kết quả |
 |---|---|
-| Backend full test | **PASS — 115/115**, 0 failure, 0 error, 0 skipped |
+| Backend full test | **PASS — 120/120**, 0 failure, 0 error, 0 skipped |
 | Frontend lint | **PASS** |
 | Frontend production build | **PASS** |
-| Route được Next.js build | **33 route** |
+| Route được Next.js build | **42 route** |
 | OpenAPI/Swagger | Đã có |
 | CI backend/frontend | Đã có workflow; cần xác nhận trên GitHub sau khi push |
 
-Điểm nghẽn không còn nằm ở seller product hoặc seller order. Bốn điểm chặn release hiện tại là:
+Admin MVP đã hoàn thành lát cắt vận hành tối thiểu. Ba điểm chặn release còn lại là:
 
-1. **Admin MVP chưa hoàn chỉnh**, hiện frontend admin chủ yếu mới có dispute.
-2. **Chưa có UAT end-to-end đủ ba role** trên một bộ dữ liệu cố định.
-3. **SePay Test Mode, R2, CORS, domain và webhook chưa được smoke test trọn luồng trên môi trường public.**
-4. **Migration, backup/restore và deploy chưa được chốt thành quy trình phát hành lặp lại được.**
+1. **Chưa có UAT end-to-end đủ ba role** trên một bộ dữ liệu cố định.
+2. **SePay Test Mode, R2, CORS, domain và webhook chưa được smoke test trọn luồng trên môi trường public.**
+3. **Backup/restore và deploy chưa được chốt thành quy trình phát hành lặp lại được.**
 
 Ước lượng ở thời điểm 13/09:
 
 | Khu vực | Mức sẵn sàng MVP ước lượng | Nhận định |
 |---|---:|---|
-| Backend nghiệp vụ lõi | 85–90% | Nhiều test quan trọng đã có; admin/audit/migration còn thiếu |
+| Backend nghiệp vụ lõi | 90–95% | Luồng lõi và Admin MVP đã có test; còn UAT/deploy và hardening production |
 | Buyer frontend | 85% | Luồng chính đã có; cần UAT, xử lý lỗi và SePay public smoke test |
 | Seller frontend | 85–90% | Dashboard, product, inventory, order, dispute, fee đã có dữ liệu thật |
-| Admin frontend | 20–30% | Dispute có; shop/user/category/withdrawal/fee còn thiếu UI vận hành |
+| Admin frontend | 80–85% | Đủ Admin MVP dùng dữ liệu thật; shop report/risk flag/notification nâng cao để sau RC |
 | Production readiness | 40–50% | Có env/R2/CI/OpenAPI nhưng chưa deploy, backup/restore, monitoring và UAT |
-| Tổng thể để demo xin thực tập | **khoảng 80%** | Có thể về đích nếu đóng băng tính năng ngay |
+| Tổng thể để demo xin thực tập | **khoảng 87%** | Admin MVP đã xong; cần tập trung UAT, public smoke test và phát hành |
 
 Các tỷ lệ trên là ước lượng quản lý tiến độ, không thay thế checklist nghiệm thu ở cuối tài liệu.
 
@@ -132,7 +131,7 @@ Việc cần làm ngay: chạy `commercehub-backend/sql/2026-09-sync-approved-sh
 
 ### 2.7. Chất lượng hiện tại
 
-- Backend có **115 test** đang xanh, gồm các test liên quan:
+- Backend có **120 test** đang xanh, gồm các test liên quan:
   - OpenAPI contract;
   - checkout idempotency/concurrency;
   - order ownership;
@@ -144,8 +143,26 @@ Việc cần làm ngay: chạy `commercehub-backend/sql/2026-09-sync-approved-sh
   - hold release;
   - R2 config, rate limit, WebP và image lifecycle;
   - shop approval và seller identity.
+  - integration test thực thi toàn bộ truy vấn inventory/dashboard admin trên PostgreSQL local.
+  - quyền admin, chặn ADMIN thường khóa SUPER_ADMIN, product BANNED và optimistic locking khi duyệt shop.
 - Frontend lint và TypeScript production build đang xanh.
 - Những log ERROR/WARN được tạo có chủ đích trong test scheduler/R2 failure-path không phải test thất bại; suite kết thúc `BUILD SUCCESS`.
+
+### 2.8. Admin MVP hoàn thành ngày 13/09/2026
+
+- Đã có console `/admin` thống nhất, route guard `ADMIN`/`SUPER_ADMIN` và sidebar riêng.
+- Dashboard dùng dữ liệu thật: user, seller, shop chờ duyệt, sản phẩm, đơn trong tháng, GMV, số và tỷ lệ khiếu nại toàn sàn, rút tiền, nạp cần đối soát, số dư hold, phí tháng/tổng phí đã thu, biểu đồ ngày và top shop/danh mục.
+- Đã có API và giao diện list/search/filter/pagination cho user, shop, sản phẩm, deposit, withdrawal, wallet transaction và audit log.
+- Duyệt shop qua API là luồng chính thức đổi BUYER thành SELLER và đồng bộ tên profile theo tên shop; có optimistic version khi duyệt.
+- Kiểm duyệt sản phẩm theo post-moderation: admin dùng `BANNED`, tách khỏi `INACTIVE` do seller tự dừng; seller không thể tự sửa/bật lại sản phẩm bị admin khóa.
+- User management hỗ trợ ACTIVE/SUSPENDED/BANNED, revoke refresh token khi khóa, chặn tự khóa và chặn ADMIN thường tác động SUPER_ADMIN.
+- Category có list toàn bộ, tạo, cập nhật, ẩn/bật; shop vẫn chỉ chọn danh mục hợp lệ.
+- Withdrawal dùng service ví nguyên tử hiện có; UI có duyệt/từ chối và xác nhận trước thao tác.
+- Fee config có trang xem mức phí active, lịch sử và tạo phiên bản tỷ lệ mới; đơn cũ tiếp tục dùng snapshot.
+- Audit tối thiểu đã ghi thao tác user/shop/product/category/dispute/withdrawal/fee gồm actor, trước/sau, lý do, IP và user-agent.
+- Migration `sql/2026-09-admin-mvp.sql` đã được áp dụng vào PostgreSQL local; `schema-v8.sql` đã đồng bộ.
+- Đã smoke-test trực tiếp 11 trang admin, không có lỗi API/runtime; frontend production build sinh 42 route.
+- Chủ động hoãn sau Release Candidate: shop reports hoàn chỉnh, risk flags/fraud engine và notification admin tổng quát.
 
 ---
 
@@ -163,16 +180,16 @@ Việc cần làm ngay: chạy `commercehub-backend/sql/2026-09-sync-approved-sh
 
 ### P0.2. Admin MVP
 
-Frontend admin hiện chưa đủ để vận hành sàn. Tối thiểu phải có:
+Frontend admin MVP đã đủ các đầu mục vận hành tối thiểu sau:
 
-1. Danh sách hồ sơ shop, lọc trạng thái.
-2. Duyệt/từ chối/ban/unban shop bằng API.
-3. Duyệt shop phải đồng bộ role SELLER và tên profile/tên shop.
-4. Danh sách user, tìm kiếm, khóa/mở khóa và bảo vệ SUPER_ADMIN.
-5. CRUD category cơ bản.
-6. Danh sách/chi tiết/xử lý withdrawal.
-7. Xem và đổi cấu hình phí sàn.
-8. Trang dispute admin hiện có phải nằm trong menu admin thống nhất.
+1. [x] Danh sách hồ sơ shop, lọc trạng thái.
+2. [x] Duyệt/từ chối/ban/unban shop bằng API.
+3. [x] Duyệt shop đồng bộ role SELLER và tên profile/tên shop.
+4. [x] Danh sách user, tìm kiếm, khóa/mở khóa và bảo vệ SUPER_ADMIN.
+5. [x] CRUD category cơ bản.
+6. [x] Danh sách và xử lý withdrawal.
+7. [x] Xem và đổi cấu hình phí sàn.
+8. [x] Trang dispute admin nằm trong menu admin thống nhất.
 
 Nếu backend của mục nào chưa có list/detail thì phải bổ sung API trước, sau đó frontend mới gọi. Không tính giao diện tĩnh là hoàn thành.
 
@@ -239,16 +256,16 @@ Kế hoạch này chỉ khả thi nếu **không nhận thêm tính năng ngoài
 
 ### 20:00–22:00 — Admin shop end-to-end
 
-- [ ] Chốt API list/filter/status shop.
-- [ ] Làm trang admin danh sách hồ sơ shop.
-- [ ] Confirm modal trước duyệt/từ chối/ban/unban.
+- [x] Chốt API list/filter/status shop.
+- [x] Làm trang admin danh sách hồ sơ shop.
+- [x] Confirm modal trước duyệt/từ chối/ban/unban.
 - [ ] Sau duyệt, kiểm tra SELLER role và tên đồng bộ.
 - [ ] Test quyền ADMIN/SUPER_ADMIN và optimistic locking.
 
 ### 22:00–23:30 — Inventory admin còn thiếu
 
-- [ ] Liệt kê chính xác API thiếu cho user/category/withdrawal/fee.
-- [ ] Viết contract request/response trước khi làm UI.
+- [x] Liệt kê chính xác API thiếu cho user/category/withdrawal/fee.
+- [x] Viết contract request/response trước khi làm UI.
 - [ ] Không bắt đầu module chat/voucher/email.
 - [ ] Chạy test liên quan và commit admin shop.
 
@@ -263,26 +280,26 @@ Kế hoạch này chỉ khả thi nếu **không nhận thêm tính năng ngoài
 
 ### 06:30–09:30 — Admin user và category
 
-- [ ] Backend list/search/filter/lock/unlock user nếu còn thiếu.
-- [ ] Không cho ADMIN thường khóa SUPER_ADMIN.
-- [ ] Frontend danh sách user và thao tác khóa/mở khóa.
-- [ ] Frontend CRUD category tối thiểu.
+- [x] Backend list/search/filter/lock/unlock user.
+- [x] Không cho ADMIN thường khóa SUPER_ADMIN.
+- [x] Frontend danh sách user và thao tác khóa/mở khóa.
+- [x] Frontend CRUD category tối thiểu.
 - [ ] Test role và validation.
 
 ### 09:45–12:30 — Admin withdrawal và fee
 
-- [ ] Bổ sung list/detail withdrawal nếu backend còn thiếu.
-- [ ] UI duyệt/từ chối withdrawal với confirm modal.
-- [ ] Chống xử lý withdrawal hai lần.
-- [ ] UI xem/đổi cấu hình phí và xem ledger cơ bản.
-- [ ] Không cho tạo hai cấu hình phí ACTIVE.
+- [x] Bổ sung list withdrawal có đủ dữ liệu đối soát.
+- [x] UI duyệt/từ chối withdrawal với confirm modal.
+- [x] Chống xử lý withdrawal hai lần bằng lock + kiểm tra PENDING.
+- [x] UI xem/đổi cấu hình phí và lịch sử cấu hình.
+- [x] Không cho tạo hai cấu hình phí ACTIVE.
 
 ### 13:30–15:00 — Chốt admin navigation
 
-- [ ] Menu admin: Tổng quan, Shop, User, Danh mục, Rút tiền, Phí sàn, Khiếu nại.
-- [ ] Route guard đầy đủ.
-- [ ] Không có mock data trong admin.
-- [ ] Ẩn chức năng chưa làm.
+- [x] Menu admin: Tổng quan, Shop, Sản phẩm, User, Danh mục, Khiếu nại, Rút tiền, Nạp tiền, Dòng tiền, Phí sàn, Audit.
+- [x] Route guard đầy đủ.
+- [x] Không có mock data trong admin.
+- [x] Không đưa shop report/risk flag chưa hoàn chỉnh vào menu vận hành.
 
 ### 15:15–18:30 — UAT BUYER và SELLER
 
@@ -381,9 +398,9 @@ Quy tắc đề xuất:
 | ID | Công việc | Mức | Deadline | Trạng thái 13/09 |
 |---|---|---|---|---|
 | P0-01 | Chạy migration đồng bộ seller identity | P0 | 13/09 20:00 | Chưa chạy |
-| P0-02 | Admin duyệt/từ chối/ban/unban shop trên UI | P0 | 13/09 23:30 | Backend có, frontend thiếu |
-| P0-03 | Admin quản lý user/category | P0 | 14/09 09:30 | Chưa đủ end-to-end |
-| P0-04 | Admin xử lý withdrawal/fee | P0 | 14/09 12:30 | Backend một phần, frontend thiếu |
+| P0-02 | Admin duyệt/từ chối/ban/unban shop trên UI | P0 | 13/09 23:30 | **Hoàn thành, đã smoke test** |
+| P0-03 | Admin quản lý user/category | P0 | 14/09 09:30 | **Hoàn thành Admin MVP** |
+| P0-04 | Admin xử lý withdrawal/fee | P0 | 14/09 12:30 | **Hoàn thành Admin MVP** |
 | P0-05 | UAT BUYER–SELLER–ADMIN | P0 | 14/09 22:30 | Chưa chạy đầy đủ |
 | P0-06 | SePay/R2 public smoke test | P0 | 14/09 22:30 | Code có, external E2E chưa chốt |
 | P0-07 | Backup/restore/migration/deploy | P0 | 15/09 15:30 | Chưa nghiệm thu |
@@ -391,7 +408,7 @@ Quy tắc đề xuất:
 | P1-01 | Forgot/reset/verify email | P1 | Sau RC | Chưa làm |
 | P1-02 | Contact/support thật | P1 | Sau RC | Đang mock |
 | P1-03 | Playwright E2E tự động | P1 | Sau RC | Chưa có baseline |
-| P1-04 | Audit log/monitoring đầy đủ | P1 | Sau RC | Chưa hoàn chỉnh |
+| P1-04 | Audit log/monitoring đầy đủ | P1 | Sau RC | Audit tối thiểu đã có; monitoring còn thiếu |
 
 Cập nhật bảng này sau mỗi block. Không để trạng thái “đang làm” quá một ngày mà không có blocker cụ thể.
 
@@ -427,8 +444,8 @@ Cập nhật bảng này sau mỗi block. Không để trạng thái “đang l�
 
 ## Gate D — Chất lượng và vận hành
 
-- [ ] Backend full test xanh.
-- [ ] Frontend lint/build xanh.
+- [x] Backend full test xanh — 120/120.
+- [x] Frontend lint/build xanh.
 - [ ] UAT đủ ba role xanh.
 - [ ] Backup và restore đã thử.
 - [ ] Có rollback procedure.
