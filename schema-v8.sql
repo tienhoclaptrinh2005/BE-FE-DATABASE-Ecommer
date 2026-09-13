@@ -1697,6 +1697,23 @@ WHERE lower_role.user_id = higher_role.user_id
 CREATE UNIQUE INDEX IF NOT EXISTS uq_user_roles_one_role_per_user
     ON user_roles(user_id);
 
+-- Đồng bộ các seller được duyệt từ dữ liệu legacy: tên hồ sơ công khai
+-- phải là tên gian hàng và tiếp tục bị khóa bởi ProfileService.
+UPDATE users AS owner
+SET full_name = shop.name,
+    updated_at = NOW()
+FROM shops AS shop
+WHERE shop.owner_id = owner.id
+  AND shop.status IN ('ACTIVE', 'BANNED')
+  AND owner.full_name IS DISTINCT FROM shop.name
+  AND EXISTS (
+      SELECT 1
+      FROM user_roles AS user_role
+      JOIN roles AS role ON role.id = user_role.role_id
+      WHERE user_role.user_id = owner.id
+        AND role.name = 'SELLER'
+  );
+
 INSERT INTO level_configs (level, label, min_spent, allowed_product_count, description) VALUES
     (1, 'Đồng',      0,           5,   'Shop đăng tối đa 5 sản phẩm'),
     (2, 'Bạc',       5000000,     20,  'Shop đăng tối đa 20 sản phẩm'),
