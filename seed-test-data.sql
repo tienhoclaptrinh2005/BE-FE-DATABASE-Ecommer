@@ -421,13 +421,13 @@ ON CONFLICT (order_code) DO NOTHING;
 
 INSERT INTO order_items (
     order_id, product_variant_id, product_name, variant_name,
-    product_type, delivery_type, unit_price, quantity, line_total,
+    product_type, delivery_type, unit_price, quantity, line_subtotal, voucher_discount, line_total,
     fee_config_id, fee_rate_snapshot, fee_amount, seller_net_amount,
     created_at
 )
 SELECT
     o.id, v.id, p.name, v.name, p.product_type, p.delivery_type,
-    v.price, 1, v.price,
+    v.price, 1, v.price, 0, v.price,
     fee.id, fee.fee_rate,
     CEIL(v.price * fee.fee_rate),
     v.price - CEIL(v.price * fee.fee_rate),

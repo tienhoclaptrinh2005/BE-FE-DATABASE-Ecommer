@@ -228,10 +228,22 @@ CREATE TABLE IF NOT EXISTS withdrawals (
     status          VARCHAR(30)   NOT NULL DEFAULT 'PENDING'
                         CHECK (status IN ('PENDING','APPROVED','REJECTED','DONE')),
     admin_note      TEXT,
+    transfer_reference VARCHAR(100),
+    approved_by_id  BIGINT        REFERENCES users(id),
+    approved_at     TIMESTAMPTZ,
     processor_id    BIGINT        REFERENCES users(id),
     created_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
     processed_at    TIMESTAMPTZ,
-    updated_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+    updated_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    CONSTRAINT withdrawals_approved_state_check CHECK (
+        status NOT IN ('APPROVED','DONE') OR approved_at IS NOT NULL
+    ),
+    CONSTRAINT withdrawals_done_state_check CHECK (
+        status <> 'DONE' OR (transfer_reference IS NOT NULL AND processed_at IS NOT NULL)
+    ),
+    CONSTRAINT withdrawals_rejected_state_check CHECK (
+        status <> 'REJECTED' OR (NULLIF(BTRIM(admin_note), '') IS NOT NULL AND processed_at IS NOT NULL)
+    )
 );
 CREATE INDEX IF NOT EXISTS idx_withdrawals_status ON withdrawals(status, created_at DESC);
 
@@ -781,10 +793,22 @@ CREATE TABLE IF NOT EXISTS vouchers (
     usage_limit         INT           NOT NULL DEFAULT 1,
     used_count          INT           NOT NULL DEFAULT 0,
     is_active           BOOLEAN       NOT NULL DEFAULT TRUE,
+    version             BIGINT        NOT NULL DEFAULT 0,
     created_at          TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_voucher_shop_code UNIQUE (shop_id, code),
-    CONSTRAINT chk_voucher_dates CHECK (expires_at > starts_at)
+    CONSTRAINT chk_voucher_dates CHECK (expires_at > starts_at),
+    CONSTRAINT chk_voucher_discount_rule CHECK (
+        (discount_type = 'PERCENT' AND discount_value < 100)
+        OR (discount_type = 'FIXED' AND max_discount_amount IS NULL)
+    ),
+    CONSTRAINT chk_voucher_amounts CHECK (
+        min_order_amount >= 0
+        AND (max_discount_amount IS NULL OR max_discount_amount > 0)
+    ),
+    CONSTRAINT chk_voucher_usage_count CHECK (
+        usage_limit > 0 AND used_count >= 0 AND used_count <= usage_limit
+    )
 );
 
 CREATE TABLE IF NOT EXISTS voucher_products (
@@ -799,9 +823,17 @@ CREATE TABLE IF NOT EXISTS voucher_usages (
     user_id         BIGINT        NOT NULL REFERENCES users(id),
     order_id        BIGINT        NOT NULL,
     discount_amount NUMERIC(18,2) NOT NULL,
+    status          VARCHAR(20)   NOT NULL DEFAULT 'APPLIED'
+                                 CHECK (status IN ('APPLIED','RELEASED')),
     used_at         TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
-    CONSTRAINT uq_voucher_user UNIQUE (voucher_id, user_id)
+    released_at     TIMESTAMPTZ,
+    CONSTRAINT chk_voucher_usage_release CHECK (
+        (status = 'APPLIED' AND released_at IS NULL)
+        OR (status = 'RELEASED' AND released_at IS NOT NULL)
+    )
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uq_voucher_user_active
+    ON voucher_usages(voucher_id, user_id) WHERE status = 'APPLIED';
 
 -- ============================================================
 -- MODULE 6: CART (THAY THẾ FAVORITE)
@@ -892,6 +924,12 @@ CREATE TABLE IF NOT EXISTS orders (
             'SELLER_ACCEPTANCE_TIMEOUT','SELLER_PROCESSING_TIMEOUT'
         ))
         OR (cancelled_by = 'ADMIN' AND cancellation_code = 'ADMIN_CANCELLED')
+    ),
+    CONSTRAINT chk_orders_voucher_amounts CHECK (
+        subtotal_amount > 0
+        AND voucher_discount >= 0
+        AND total_amount > 0
+        AND total_amount = subtotal_amount - voucher_discount
     )
 );
 CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, status);
@@ -919,6 +957,8 @@ CREATE TABLE IF NOT EXISTS order_items (
     delivery_type      VARCHAR(20)   NOT NULL CHECK (delivery_type IN ('INSTANT','PRE_ORDER')),
     unit_price         NUMERIC(18,2) NOT NULL,
     quantity           INT           NOT NULL DEFAULT 1 CHECK (quantity > 0),
+    line_subtotal      NUMERIC(18,2) NOT NULL,
+    voucher_discount   NUMERIC(18,2) NOT NULL DEFAULT 0,
     line_total         NUMERIC(18,2) NOT NULL,
     -- Snapshot phí sàn chốt lúc buyer thanh toán
     fee_config_id      BIGINT,
@@ -928,7 +968,13 @@ CREATE TABLE IF NOT EXISTS order_items (
     refund_status      VARCHAR(20) NOT NULL DEFAULT 'NONE'
                            CHECK (refund_status IN ('NONE','REFUNDED')),
     refunded_at        TIMESTAMPTZ,
-    created_at         TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+    created_at         TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_order_items_voucher_amounts CHECK (
+        line_subtotal > 0
+        AND voucher_discount >= 0
+        AND line_total > 0
+        AND line_total = line_subtotal - voucher_discount
+    )
 );
 CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
 CREATE INDEX IF NOT EXISTS idx_order_items_refund ON order_items(order_id, refund_status);
@@ -1105,14 +1151,18 @@ CREATE TABLE IF NOT EXISTS order_disputes (
                            )),
     resolution         VARCHAR(40)
                            CHECK (resolution IS NULL OR resolution IN (
-                               'BUYER_WIN','SELLER_WIN','BUYER_WITHDREW',
+                               'BUYER_WIN','SELLER_WIN','SELLER_REFUND','BUYER_WITHDREW',
                                'WARRANTY_ACCEPTED','BUYER_CONFIRMATION_TIMEOUT'
                            )),
     resolved_by        VARCHAR(20)
-                           CHECK (resolved_by IS NULL OR resolved_by IN ('BUYER','ADMIN','SYSTEM')),
+                           CHECK (resolved_by IS NULL OR resolved_by IN ('BUYER','SELLER','ADMIN','SYSTEM')),
     refund_amount      NUMERIC(18,2),
     resolution_note    TEXT,
     resolver_id        BIGINT        REFERENCES users(id),
+    escalated_at       TIMESTAMPTZ,
+    escalated_by       VARCHAR(20)
+                           CHECK (escalated_by IS NULL OR escalated_by IN ('BUYER','SELLER')),
+    escalation_reason  VARCHAR(200),
     created_at         TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
     deadline_at        TIMESTAMPTZ   NOT NULL,
     resolved_at        TIMESTAMPTZ,
@@ -1122,7 +1172,10 @@ CREATE TABLE IF NOT EXISTS order_disputes (
             AND resolution IS NOT NULL
             AND resolved_by IS NOT NULL
             AND resolved_at IS NOT NULL
-            AND ((resolved_by = 'ADMIN' AND resolver_id IS NOT NULL)
+            AND ((resolved_by = 'ADMIN' AND resolver_id IS NOT NULL
+                    AND resolution_note IS NOT NULL AND BTRIM(resolution_note) <> '')
+                OR (resolved_by = 'SELLER' AND resolver_id IS NOT NULL
+                    AND resolution = 'SELLER_REFUND')
                 OR (resolved_by IN ('BUYER','SYSTEM') AND resolver_id IS NULL)))
         OR
         (status <> 'RESOLVED'
@@ -1130,6 +1183,14 @@ CREATE TABLE IF NOT EXISTS order_disputes (
             AND resolved_by IS NULL
             AND resolver_id IS NULL
             AND resolved_at IS NULL)
+    ),
+    CONSTRAINT chk_order_disputes_escalation CHECK (
+        ((escalated_at IS NULL AND escalated_by IS NULL AND escalation_reason IS NULL)
+            OR (escalated_at IS NOT NULL AND escalated_by IS NOT NULL
+                AND escalation_reason IS NOT NULL AND BTRIM(escalation_reason) <> ''))
+        AND (status <> 'ADMIN_REVIEW'
+            OR (escalated_at IS NOT NULL AND escalated_by IS NOT NULL
+                AND escalation_reason IS NOT NULL AND BTRIM(escalation_reason) <> ''))
     )
 );
 CREATE INDEX IF NOT EXISTS idx_disputes_status_deadline
@@ -1203,35 +1264,66 @@ WHERE stats.shop_id = shop.id;
 -- MODULE 10: CHAT / NOTIFICATION / AUDIT / FRAUD / OPS
 -- ============================================================
 
-CREATE TABLE IF NOT EXISTS chat_rooms (
-    id               BIGSERIAL   PRIMARY KEY,
-    participant_a    BIGINT      NOT NULL REFERENCES users(id),
-    participant_b    BIGINT      NOT NULL REFERENCES users(id),
-    shop_id          BIGINT      REFERENCES shops(id),
-    related_order_id BIGINT      REFERENCES orders(id),
-    last_message_at  TIMESTAMPTZ,
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT chk_participants CHECK (participant_a < participant_b)
+CREATE TABLE IF NOT EXISTS conversations (
+    id BIGSERIAL PRIMARY KEY,
+    shop_id BIGINT NOT NULL REFERENCES shops(id),
+    buyer_id BIGINT NOT NULL REFERENCES users(id),
+    seller_id BIGINT NOT NULL REFERENCES users(id),
+    status VARCHAR(20) NOT NULL DEFAULT 'OPEN',
+    last_message_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_conversation_distinct_users CHECK (buyer_id <> seller_id),
+    CONSTRAINT chk_conversation_status CHECK (status IN ('OPEN', 'CLOSED')),
+    CONSTRAINT uq_conversation_shop_buyer_seller UNIQUE (shop_id, buyer_id, seller_id)
 );
--- UNIQUE (a,b,shop_id) KHÔNG chặn trùng khi shop_id IS NULL (NULL != NULL trong UNIQUE)
--- → thay bằng 2 partial unique index để chặn trùng cả 2 trường hợp
-ALTER TABLE chat_rooms DROP CONSTRAINT IF EXISTS uq_chat_room;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_chat_room_shop
-    ON chat_rooms(participant_a, participant_b, shop_id) WHERE shop_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_chat_room_direct
-    ON chat_rooms(participant_a, participant_b) WHERE shop_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_conversations_buyer_activity ON conversations(buyer_id, last_message_at DESC NULLS LAST, id DESC);
+CREATE INDEX IF NOT EXISTS idx_conversations_seller_activity ON conversations(seller_id, last_message_at DESC NULLS LAST, id DESC);
 
-CREATE TABLE IF NOT EXISTS chat_messages (
-    id              BIGSERIAL   PRIMARY KEY,
-    room_id         BIGINT      NOT NULL REFERENCES chat_rooms(id) ON DELETE CASCADE,
-    sender_id       BIGINT      NOT NULL REFERENCES users(id),
-    content         TEXT        NOT NULL,
-    attachment_url  VARCHAR(500),
-    attachment_type VARCHAR(30),
-    is_read         BOOLEAN     NOT NULL DEFAULT FALSE,
-    sent_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS conversation_participants (
+    id BIGSERIAL PRIMARY KEY,
+    conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    participant_role VARCHAR(20) NOT NULL,
+    last_read_message_id BIGINT,
+    last_read_at TIMESTAMPTZ,
+    joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_conversation_participant_role CHECK (participant_role IN ('BUYER', 'SELLER')),
+    CONSTRAINT uq_conversation_participant UNIQUE (conversation_id, user_id)
 );
-CREATE INDEX IF NOT EXISTS idx_chat_messages_room ON chat_messages(room_id, sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_conversation_participants_user ON conversation_participants(user_id, conversation_id);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id BIGSERIAL PRIMARY KEY,
+    conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    sender_id BIGINT NOT NULL REFERENCES users(id),
+    client_message_id UUID NOT NULL,
+    message_type VARCHAR(20) NOT NULL DEFAULT 'TEXT',
+    content VARCHAR(2000) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_message_type CHECK (message_type IN ('TEXT')),
+    CONSTRAINT chk_message_content CHECK (char_length(btrim(content)) BETWEEN 1 AND 2000),
+    CONSTRAINT uq_message_sender_client_id UNIQUE (sender_id, client_message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_messages_conversation_cursor ON messages(conversation_id, id DESC);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_conversation_participant_last_read') THEN
+        ALTER TABLE conversation_participants
+            ADD CONSTRAINT fk_conversation_participant_last_read
+            FOREIGN KEY (last_read_message_id) REFERENCES messages(id) ON DELETE SET NULL;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS message_reads (
+    id BIGSERIAL PRIMARY KEY,
+    message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    read_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_message_read UNIQUE (message_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_message_reads_user ON message_reads(user_id, message_id DESC);
 
 CREATE TABLE IF NOT EXISTS notifications (
     id          BIGSERIAL    PRIMARY KEY,
@@ -1256,6 +1348,7 @@ CREATE TABLE IF NOT EXISTS seller_notification_reads (
     instant_orders_read_at  TIMESTAMPTZ NOT NULL DEFAULT TIMESTAMPTZ 'epoch',
     pre_orders_read_at      TIMESTAMPTZ NOT NULL DEFAULT TIMESTAMPTZ 'epoch',
     disputes_read_at        TIMESTAMPTZ NOT NULL DEFAULT TIMESTAMPTZ 'epoch',
+    withdrawals_read_at     TIMESTAMPTZ NOT NULL DEFAULT TIMESTAMPTZ 'epoch',
     created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -1510,6 +1603,62 @@ ALTER TABLE pre_order_items ADD CONSTRAINT chk_pre_order_delivery_content_type
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS checkout_request_id BIGINT;
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS refund_status VARCHAR(20) NOT NULL DEFAULT 'NONE';
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMPTZ;
+
+-- Voucher MVP: tương thích khi chạy schema-v8.sql trên database đã tồn tại.
+ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE vouchers DROP CONSTRAINT IF EXISTS chk_voucher_discount_rule;
+ALTER TABLE vouchers DROP CONSTRAINT IF EXISTS chk_voucher_amounts;
+ALTER TABLE vouchers DROP CONSTRAINT IF EXISTS chk_voucher_usage_count;
+ALTER TABLE vouchers ADD CONSTRAINT chk_voucher_discount_rule CHECK (
+    (discount_type = 'PERCENT' AND discount_value < 100)
+    OR (discount_type = 'FIXED' AND max_discount_amount IS NULL)
+);
+ALTER TABLE vouchers ADD CONSTRAINT chk_voucher_amounts CHECK (
+    min_order_amount >= 0
+    AND (max_discount_amount IS NULL OR max_discount_amount > 0)
+);
+ALTER TABLE vouchers ADD CONSTRAINT chk_voucher_usage_count CHECK (
+    usage_limit > 0 AND used_count >= 0 AND used_count <= usage_limit
+);
+
+ALTER TABLE voucher_usages ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'APPLIED';
+ALTER TABLE voucher_usages ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ;
+ALTER TABLE voucher_usages DROP CONSTRAINT IF EXISTS uq_voucher_user;
+ALTER TABLE voucher_usages DROP CONSTRAINT IF EXISTS voucher_usages_status_check;
+ALTER TABLE voucher_usages DROP CONSTRAINT IF EXISTS chk_voucher_usage_release;
+ALTER TABLE voucher_usages ADD CONSTRAINT voucher_usages_status_check
+    CHECK (status IN ('APPLIED','RELEASED'));
+ALTER TABLE voucher_usages ADD CONSTRAINT chk_voucher_usage_release CHECK (
+    (status = 'APPLIED' AND released_at IS NULL)
+    OR (status = 'RELEASED' AND released_at IS NOT NULL)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_voucher_user_active
+    ON voucher_usages(voucher_id, user_id) WHERE status = 'APPLIED';
+
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS line_subtotal NUMERIC(18,2);
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS voucher_discount NUMERIC(18,2) NOT NULL DEFAULT 0;
+UPDATE order_items
+SET line_subtotal = line_total + COALESCE(voucher_discount, 0)
+WHERE line_subtotal IS NULL;
+ALTER TABLE order_items ALTER COLUMN line_subtotal SET NOT NULL;
+ALTER TABLE order_items DROP CONSTRAINT IF EXISTS chk_order_items_voucher_amounts;
+ALTER TABLE order_items ADD CONSTRAINT chk_order_items_voucher_amounts CHECK (
+    line_subtotal > 0
+    AND voucher_discount >= 0
+    AND line_total > 0
+    AND line_total = line_subtotal - voucher_discount
+);
+
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS voucher_id BIGINT REFERENCES vouchers(id);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS voucher_discount NUMERIC(18,2) NOT NULL DEFAULT 0;
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS chk_orders_voucher_amounts;
+ALTER TABLE orders ADD CONSTRAINT chk_orders_voucher_amounts CHECK (
+    subtotal_amount > 0
+    AND voucher_discount >= 0
+    AND total_amount > 0
+    AND total_amount = subtotal_amount - voucher_discount
+);
+
 ALTER TABLE order_disputes ADD COLUMN IF NOT EXISTS resolution VARCHAR(40);
 ALTER TABLE order_disputes ADD COLUMN IF NOT EXISTS resolved_by VARCHAR(20);
 ALTER TABLE order_disputes ADD COLUMN IF NOT EXISTS closed_reason VARCHAR(40);
@@ -1530,6 +1679,9 @@ BEGIN
     END IF;
 END $$;
 ALTER TABLE order_disputes ADD COLUMN IF NOT EXISTS resolution_note TEXT;
+ALTER TABLE order_disputes ADD COLUMN IF NOT EXISTS escalated_at TIMESTAMPTZ;
+ALTER TABLE order_disputes ADD COLUMN IF NOT EXISTS escalated_by VARCHAR(20);
+ALTER TABLE order_disputes ADD COLUMN IF NOT EXISTS escalation_reason VARCHAR(200);
 ALTER TABLE idempotency_keys ADD COLUMN IF NOT EXISTS request_hash VARCHAR(64);
 UPDATE idempotency_keys SET request_hash = REPEAT('0', 64) WHERE request_hash IS NULL;
 ALTER TABLE idempotency_keys ALTER COLUMN request_hash SET NOT NULL;
@@ -1597,6 +1749,28 @@ SET status = CASE status
         ELSE status
     END;
 
+-- Dữ liệu cũ không lưu actor/lý do chuyển cấp; suy luận từ phản hồi seller để
+-- bảo toàn hồ sơ local và đáp ứng contract mới từ thời điểm migration trở đi.
+UPDATE order_disputes
+SET escalated_at = COALESCE(escalated_at, updated_at, created_at, NOW()),
+    escalated_by = COALESCE(
+        escalated_by,
+        CASE WHEN NULLIF(BTRIM(shop_response), '') IS NOT NULL THEN 'SELLER' ELSE 'BUYER' END
+    ),
+    escalation_reason = COALESCE(
+        NULLIF(BTRIM(escalation_reason), ''),
+        NULLIF(LEFT(BTRIM(shop_response), 200), ''),
+        'Hồ sơ cũ đã được chuyển đến Admin'
+    )
+WHERE status = 'ADMIN_REVIEW'
+   OR (status = 'RESOLVED' AND resolved_by = 'ADMIN');
+
+UPDATE order_disputes
+SET resolution_note = 'Phán quyết Admin từ dữ liệu cũ'
+WHERE status = 'RESOLVED'
+  AND resolved_by = 'ADMIN'
+  AND NULLIF(BTRIM(resolution_note), '') IS NULL;
+
 -- Metadata phán quyết chỉ được giữ trên tranh chấp đã kết thúc.
 UPDATE order_disputes
 SET resolution = NULL,
@@ -1612,14 +1786,19 @@ ALTER TABLE order_disputes ADD CONSTRAINT order_disputes_status_check
     ));
 ALTER TABLE order_disputes DROP CONSTRAINT IF EXISTS order_disputes_resolution_check;
 ALTER TABLE order_disputes DROP CONSTRAINT IF EXISTS order_disputes_resolved_by_check;
+ALTER TABLE order_disputes DROP CONSTRAINT IF EXISTS order_disputes_escalated_by_check;
+ALTER TABLE order_disputes DROP CONSTRAINT IF EXISTS chk_order_disputes_escalation;
 ALTER TABLE order_disputes ADD CONSTRAINT order_disputes_resolution_check CHECK (
     resolution IS NULL OR resolution IN (
-        'BUYER_WIN','SELLER_WIN','BUYER_WITHDREW',
+        'BUYER_WIN','SELLER_WIN','SELLER_REFUND','BUYER_WITHDREW',
         'WARRANTY_ACCEPTED','BUYER_CONFIRMATION_TIMEOUT'
     )
 );
 ALTER TABLE order_disputes ADD CONSTRAINT order_disputes_resolved_by_check CHECK (
-    resolved_by IS NULL OR resolved_by IN ('BUYER','ADMIN','SYSTEM')
+    resolved_by IS NULL OR resolved_by IN ('BUYER','SELLER','ADMIN','SYSTEM')
+);
+ALTER TABLE order_disputes ADD CONSTRAINT order_disputes_escalated_by_check CHECK (
+    escalated_by IS NULL OR escalated_by IN ('BUYER','SELLER')
 );
 ALTER TABLE order_disputes ADD CONSTRAINT chk_order_disputes_resolution
     CHECK (
@@ -1627,8 +1806,11 @@ ALTER TABLE order_disputes ADD CONSTRAINT chk_order_disputes_resolution
             AND resolution IS NOT NULL
             AND resolved_by IS NOT NULL
             AND resolved_at IS NOT NULL
-            AND ((resolved_by = 'ADMIN' AND resolver_id IS NOT NULL)
-                OR (resolved_by IN ('BUYER','SYSTEM') AND resolver_id IS NULL)))
+            AND ((resolved_by = 'ADMIN' AND resolver_id IS NOT NULL
+                    AND resolution_note IS NOT NULL AND BTRIM(resolution_note) <> '')
+            OR (resolved_by = 'SELLER' AND resolver_id IS NOT NULL
+                AND resolution = 'SELLER_REFUND')
+            OR (resolved_by IN ('BUYER','SYSTEM') AND resolver_id IS NULL)))
         OR
         (status <> 'RESOLVED'
             AND resolution IS NULL
@@ -1636,6 +1818,14 @@ ALTER TABLE order_disputes ADD CONSTRAINT chk_order_disputes_resolution
             AND resolver_id IS NULL
             AND resolved_at IS NULL)
     );
+ALTER TABLE order_disputes ADD CONSTRAINT chk_order_disputes_escalation CHECK (
+    ((escalated_at IS NULL AND escalated_by IS NULL AND escalation_reason IS NULL)
+        OR (escalated_at IS NOT NULL AND escalated_by IS NOT NULL
+            AND escalation_reason IS NOT NULL AND BTRIM(escalation_reason) <> ''))
+    AND (status <> 'ADMIN_REVIEW'
+        OR (escalated_at IS NOT NULL AND escalated_by IS NOT NULL
+            AND escalation_reason IS NOT NULL AND BTRIM(escalation_reason) <> ''))
+);
 ALTER TABLE order_disputes DROP COLUMN IF EXISTS closed_reason;
 
 DROP INDEX IF EXISTS uq_orders_user_idem_key;
