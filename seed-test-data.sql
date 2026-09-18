@@ -510,7 +510,7 @@ SET approved_at = COALESCE(approved_at, placed_at + INTERVAL '1 hour'),
 WHERE order_code = 'SEED-ORDER-004';
 
 INSERT INTO pre_order_items (
-    order_item_id, buyer_inputs, buyer_note, status,
+    order_item_id, buyer_inputs, buyer_note,
     delivery_content, delivery_content_type, seller_notes,
     accepted_at, delivered_at, completed_at, created_at, updated_at
 )
@@ -518,7 +518,6 @@ SELECT
     oi.id,
     '{"canvaEmail":"buyer.demo@commercehub.test"}',
     'Đơn test luồng đặt trước',
-    'DELIVERED',
     'Canva Pro đã được nâng cấp cho buyer.demo@commercehub.test',
     'MESSAGE',
     'Seed: shop đã xử lý và giao thành công',
